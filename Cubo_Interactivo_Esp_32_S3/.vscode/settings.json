@@ -2,7 +2,7 @@
   "C_Cpp.intelliSenseEngine": "default",
   "idf.extensionActivationMode": "always",
   "cmake.configureOnOpen": false,
-  "cmake.configureOnEdit": false,
+  "cmake.configureOnEdit": true,
   "cmake.automaticReconfigure": false,
   "cmake.autoSelectActiveFolder": false,
   "cmake.options.advanced": {
@@ -22,7 +22,7 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-bridge.cfg"
   ],
-  "idf.port": "COM27",
+  "idf.port": "COM13",
   "idf.currentSetup": "C:\\esp\\v5.5.4\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"

@@ -22,15 +22,21 @@ build/
 *.o
 *.a
 *.out
-*.exe # For any host-side utilities compiled on Windows
+# Host-side utilities compiled on Windows
+*.exe
 
 # ESP-IDF specific build outputs
 *.bin
 *.elf
 *.map
-flasher_args.json # Generated in build directory
-sdkconfig.old
-sdkconfig
+# Generated flash arguments
+flasher_args.json
+
+# Local generated ESP-IDF configuration; commit sdkconfig.defaults instead.
+/sdkconfig
+/sdkconfig.old
+!/sdkconfig.defaults
+!/sdkconfig.defaults.*
 
 # ESP-IDF dependencies
 # For older versions or manual component management
@@ -73,6 +79,8 @@ Desktop.ini
 
 # User-specific configuration files
 *.user
-*.workspace # General workspace files, can be from various tools
-*.suo       # Visual Studio Solution User Options
-*.sln.docstates # Visual Studio
+# General workspace files, can be from various tools
+*.workspace
+# Visual Studio user options and document states
+*.suo
+*.sln.docstates

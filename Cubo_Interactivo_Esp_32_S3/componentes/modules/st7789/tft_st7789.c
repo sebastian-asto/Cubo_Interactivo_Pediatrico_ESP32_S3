@@ -188,6 +188,7 @@ esp_err_t tft_init(void)
     }
 
     const spi_device_interface_config_t device_config = {
+        .clock_source = SPI_CLK_SRC_DEFAULT,
         .clock_speed_hz = TFT_SPI_CLOCK_HZ,
         .mode = 0,
         .spics_io_num = TFT_PIN_CS,
@@ -233,6 +234,46 @@ esp_err_t tft_fullScreen(tft_color_t color)
     const size_t pixel_count = TFT_WIDTH * TFT_HEIGHT;
     for (size_t i = 0; i < pixel_count; ++i) {
         s_framebuffer[i] = color_be;
+    }
+    return ESP_OK;
+}
+
+esp_err_t tft_validate_image(const uint8_t *image, size_t image_size)
+{
+    if (image == NULL || image_size < 8U || memcmp(image, "TFT1", 4) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const uint16_t width = ((uint16_t)image[4] << 8) | image[5];
+    const uint16_t height = ((uint16_t)image[6] << 8) | image[7];
+    if (width == 0 || height == 0 || width > TFT_WIDTH || height > TFT_HEIGHT ||
+        image_size != 8U + (size_t)width * height * sizeof(uint16_t)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t tft_draw_image(const uint8_t *image, size_t image_size)
+{
+    if (!s_initialized || s_framebuffer == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = tft_validate_image(image, image_size);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const uint16_t width = ((uint16_t)image[4] << 8) | image[5];
+    const uint16_t height = ((uint16_t)image[6] << 8) | image[7];
+
+    const size_t x_offset = (TFT_WIDTH - width) / 2U;
+    const size_t y_offset = (TFT_HEIGHT - height) / 2U;
+    uint8_t *destination = (uint8_t *)s_framebuffer;
+    memset(destination, 0, TFT_FRAME_BYTES);
+    for (size_t y = 0; y < height; ++y) {
+        /* El archivo ya contiene los bytes en el orden que recibe el LCD. */
+        memcpy(destination + ((y + y_offset) * TFT_WIDTH + x_offset) * 2U,
+               image + 8U + y * width * 2U, width * 2U);
     }
     return ESP_OK;
 }
