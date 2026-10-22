@@ -8,6 +8,8 @@ import 'tft_codec.dart';
 
 class ArtworkStore extends ChangeNotifier {
   final Map<int, Uint8List> custom = {};
+  final Map<int, Uint8List> audio = {};
+  final Set<int> audioRemoved = {};
   Directory? _directory;
   Future<void> load() async {
     final root = await getApplicationSupportDirectory();
@@ -17,6 +19,9 @@ class ArtworkStore extends ChangeNotifier {
     for (var i = 0; i < emotionIds.length; i++) {
       final file = _file(i);
       if (await file.exists()) custom[i] = await file.readAsBytes();
+      final audioFile = _audioFile(i);
+      if (await audioFile.exists()) audio[i] = await audioFile.readAsBytes();
+      if (await _audioMarker(i).exists()) audioRemoved.add(i);
     }
     // Android may kill the activity while its gallery is open.
     if (Platform.isAndroid) {
@@ -27,7 +32,7 @@ class ArtworkStore extends ChangeNotifier {
         try {
           if (index != null &&
               index >= 0 &&
-              index < 16 &&
+              index < emotionIds.length &&
               lost.files?.isNotEmpty == true) {
             final bytes = await lost.files!.first.readAsBytes();
             final png = await compute(prepareImage, {
@@ -57,6 +62,9 @@ class ArtworkStore extends ChangeNotifier {
   }
 
   File _file(int i) => File('${_directory!.path}/${emotionIds[i]}.png');
+  File _audioFile(int i) => File('${_directory!.path}/${emotionIds[i]}.wav');
+  File _audioMarker(int i) =>
+      File('${_directory!.path}/${emotionIds[i]}.noaudio');
   Future<void> save(int i, Uint8List png) async {
     final temp = File('${_file(i).path}.tmp');
     await temp.writeAsBytes(png, flush: true);
@@ -65,7 +73,36 @@ class ArtworkStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> clear() async {
+  Future<void> saveAudio(int i, Uint8List wav) async {
+    final destination = _audioFile(i);
+    final temp = File('${destination.path}.tmp');
+    await temp.writeAsBytes(wav, flush: true);
+    if (await destination.exists()) await destination.delete();
+    await temp.rename(destination.path);
+    final marker = _audioMarker(i);
+    if (await marker.exists()) await marker.delete();
+    audio[i] = wav;
+    audioRemoved.remove(i);
+    notifyListeners();
+  }
+
+  Future<void> removeAudio(int i) async {
+    final file = _audioFile(i);
+    if (await file.exists()) await file.delete();
+    await _audioMarker(i).writeAsString('remove', flush: true);
+    audio.remove(i);
+    audioRemoved.add(i);
+    notifyListeners();
+  }
+
+  Future<void> confirmAudioRemoval(int i) async {
+    final marker = _audioMarker(i);
+    if (await marker.exists()) await marker.delete();
+    audioRemoved.remove(i);
+    notifyListeners();
+  }
+
+  Future<void> clearImages() async {
     for (var i = 0; i < emotionIds.length; i++) {
       final f = _file(i);
       if (await f.exists()) await f.delete();
@@ -73,4 +110,18 @@ class ArtworkStore extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  Future<void> clearAudio() async {
+    for (var i = 0; i < emotionIds.length; i++) {
+      final audioFile = _audioFile(i);
+      final marker = _audioMarker(i);
+      if (await audioFile.exists()) await audioFile.delete();
+      if (await marker.exists()) await marker.delete();
+    }
+    audio.clear();
+    audioRemoved.clear();
+    notifyListeners();
+  }
+
+  Future<void> clear() => clearImages();
 }

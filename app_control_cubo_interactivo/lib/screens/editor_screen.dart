@@ -1,10 +1,16 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+
+import 'package:audioplayers/audioplayers.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+
 import '../main.dart';
 import '../models/emotion.dart';
 import '../services/artwork_store.dart';
 import '../services/tft_codec.dart';
+import '../services/wav_codec.dart';
 
 class EditorScreen extends StatefulWidget {
   const EditorScreen({super.key, required this.index, required this.store});
@@ -15,10 +21,30 @@ class EditorScreen extends StatefulWidget {
 }
 
 class _EditorScreenState extends State<EditorScreen> {
-  Uint8List? source, preview;
-  bool cover = true, working = false;
-  double zoom = 1;
-  String? error;
+  Uint8List? source, preview, audioSource;
+  WavInfo? audioInfo;
+  List<double>? waveform;
+  bool cover = true, working = false, removeAudio = false, playing = false;
+  double zoom = 1, audioStart = 0;
+  String? audioName, error;
+  final AudioPlayer player = AudioPlayer();
+  StreamSubscription<void>? completeSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    completeSubscription = player.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => playing = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    completeSubscription?.cancel();
+    player.dispose();
+    super.dispose();
+  }
+
   Future<void> _render() async {
     if (source == null) return;
     setState(() {
@@ -31,12 +57,7 @@ class _EditorScreenState extends State<EditorScreen> {
         'cover': cover,
         'zoom': zoom,
       });
-      if (mounted) {
-        setState(() {
-          preview = result;
-          error = null;
-        });
-      }
+      if (mounted) setState(() => preview = result);
     } catch (e) {
       if (mounted) setState(() => error = e.toString());
     } finally {
@@ -44,7 +65,7 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  Future<void> _pick() async {
+  Future<void> _pickImage() async {
     setState(() => working = true);
     try {
       await widget.store.beginPick(widget.index);
@@ -57,12 +78,46 @@ class _EditorScreenState extends State<EditorScreen> {
       if (file == null || !mounted) return;
       source = await file.readAsBytes();
       zoom = 1;
-      if (!mounted) return;
       await _render();
+    } catch (_) {
+      if (mounted) setState(() => error = 'No se pudo abrir la galería.');
+    } finally {
+      if (mounted) setState(() => working = false);
+    }
+  }
+
+  Future<void> _pickAudio() async {
+    setState(() {
+      working = true;
+      error = null;
+    });
+    try {
+      final file = await FilePicker.pickFile(
+        type: FileType.custom,
+        allowedExtensions: const ['wav'],
+      );
+      if (file == null) return;
+      final bytes = await file.readAsBytes();
+      if (bytes.length > 30 * 1024 * 1024) {
+        throw const FormatException('El WAV supera el límite de 30 MB.');
+      }
+      final info = inspectWav(bytes);
+      if (mounted) {
+        setState(() {
+          audioSource = bytes;
+          audioInfo = info;
+          waveform = buildWaveform(bytes);
+          audioName = file.name;
+          audioStart = 0;
+          removeAudio = false;
+        });
+      }
     } catch (e) {
       if (mounted) {
         setState(
-          () => error = 'No se pudo abrir la galería. Vuelve a intentarlo.',
+          () => error = e is FormatException
+              ? e.message
+              : 'No se pudo abrir el audio WAV.',
         );
       }
     } finally {
@@ -70,26 +125,66 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  Future<void> _save() async {
-    setState(() => working = true);
+  Future<void> _previewAudio() async {
+    if (playing) {
+      await player.stop();
+      if (mounted) setState(() => playing = false);
+      return;
+    }
+    if (audioSource == null) return;
+    setState(() {
+      working = true;
+      error = null;
+    });
     try {
-      await widget.store.save(widget.index, preview!);
-      if (mounted) Navigator.pop(context);
+      final wav = await compute(canonicalizeWav, {
+        'bytes': audioSource!,
+        'start': audioStart,
+      });
+      await player.play(BytesSource(wav));
+      if (mounted) setState(() => playing = true);
     } catch (e) {
       if (mounted) {
-        setState(() {
-          error = 'No se pudo guardar: $e';
-          working = false;
-        });
+        setState(() => error = 'No se pudo reproducir el fragmento: $e');
       }
+    } finally {
+      if (mounted) setState(() => working = false);
+    }
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      working = true;
+      error = null;
+    });
+    try {
+      if (preview != null) await widget.store.save(widget.index, preview!);
+      if (audioSource != null) {
+        final wav = await compute(canonicalizeWav, {
+          'bytes': audioSource!,
+          'start': audioStart,
+        });
+        await widget.store.saveAudio(widget.index, wav);
+      } else if (removeAudio) {
+        await widget.store.removeAudio(widget.index);
+      }
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) setState(() => error = 'No se pudo guardar: $e');
+    } finally {
+      if (mounted) setState(() => working = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final current = preview ?? widget.store.custom[widget.index];
+    final hasStoredAudio = widget.store.audio.containsKey(widget.index);
+    final maxStart = ((audioInfo?.durationSeconds ?? 0) - maxAudioSeconds)
+        .clamp(0.0, double.infinity);
+    final changed = preview != null || audioSource != null || removeAudio;
     return Scaffold(
-      appBar: AppBar(title: const Text('Dale tu propio toque')),
+      appBar: AppBar(title: const Text('Imagen y sonido')),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(22),
@@ -104,12 +199,14 @@ class _EditorScreenState extends State<EditorScreen> {
               ),
             ),
             const SizedBox(height: 8),
-            const Text('Elige una imagen que represente esta emoción para ti.'),
-            const SizedBox(height: 22),
+            const Text(
+              'Elige una imagen y, si deseas, un sonido para esta emoción.',
+            ),
+            const SizedBox(height: 20),
             Center(
               child: Container(
-                width: 280,
-                height: 280,
+                width: 260,
+                height: 260,
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
                   color: sage,
@@ -130,20 +227,14 @@ class _EditorScreenState extends State<EditorScreen> {
                 ),
               ),
             ),
-            const SizedBox(height: 10),
-            const Text(
-              'Vista previa de la pantalla del cubo',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12),
-            ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 14),
             OutlinedButton.icon(
-              onPressed: working ? null : _pick,
+              onPressed: working ? null : _pickImage,
               icon: const Icon(Icons.photo_library_outlined),
-              label: const Text('Elegir de mi galería'),
+              label: const Text('Elegir imagen'),
             ),
             if (source != null) ...[
-              const SizedBox(height: 18),
+              const SizedBox(height: 12),
               SegmentedButton<bool>(
                 segments: const [
                   ButtonSegment(value: true, label: Text('Llenar cuadro')),
@@ -158,7 +249,7 @@ class _EditorScreenState extends State<EditorScreen> {
                       },
               ),
               if (cover) ...[
-                const SizedBox(height: 14),
+                const SizedBox(height: 8),
                 const Text('Acercar al centro'),
                 Slider(
                   value: zoom,
@@ -170,6 +261,91 @@ class _EditorScreenState extends State<EditorScreen> {
                 ),
               ],
             ],
+            const Divider(height: 38),
+            const Text(
+              'SONIDO DE LA EMOCIÓN',
+              style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              audioSource != null
+                  ? '$audioName · ${audioInfo!.durationSeconds.toStringAsFixed(1)} s'
+                  : hasStoredAudio && !removeAudio
+                  ? 'Hay un audio personalizado guardado.'
+                  : 'Sin audio personalizado.',
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: working ? null : _pickAudio,
+              icon: const Icon(Icons.audio_file_outlined),
+              label: const Text('Seleccionar audio WAV'),
+            ),
+            if (audioSource != null) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                height: 92,
+                child: CustomPaint(
+                  painter: _WaveformPainter(
+                    waveform!,
+                    startFraction: audioStart / audioInfo!.durationSeconds,
+                    endFraction:
+                        (audioStart + maxAudioSeconds).clamp(
+                          0,
+                          audioInfo!.durationSeconds,
+                        ) /
+                        audioInfo!.durationSeconds,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Inicio: ${audioStart.toStringAsFixed(1)} s · fragmento de hasta 15 s',
+              ),
+              Slider(
+                value: audioStart.clamp(0, maxStart),
+                min: 0,
+                max: maxStart == 0 ? 1 : maxStart,
+                onChanged: maxStart == 0 || working
+                    ? null
+                    : (v) {
+                        if (playing) {
+                          player.stop();
+                          playing = false;
+                        }
+                        setState(() => audioStart = v);
+                      },
+              ),
+              FilledButton.tonalIcon(
+                onPressed: working ? null : _previewAudio,
+                icon: Icon(
+                  playing
+                      ? Icons.stop_circle_outlined
+                      : Icons.play_circle_outline,
+                ),
+                label: Text(
+                  playing ? 'Detener vista previa' : 'Escuchar los 15 segundos',
+                ),
+              ),
+              const Text(
+                'La app lo convertirá a WAV PCM mono de 16 kHz para el cubo.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
+            if (hasStoredAudio || audioSource != null)
+              TextButton.icon(
+                onPressed: working
+                    ? null
+                    : () => setState(() {
+                        audioSource = null;
+                        audioInfo = null;
+                        waveform = null;
+                        audioName = null;
+                        removeAudio = true;
+                      }),
+                icon: const Icon(Icons.volume_off_outlined),
+                label: const Text('Quitar sonido de esta emoción'),
+              ),
             if (working)
               const Padding(
                 padding: EdgeInsets.all(16),
@@ -183,16 +359,14 @@ class _EditorScreenState extends State<EditorScreen> {
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
             FilledButton(
-              onPressed: preview == null || working || error != null
-                  ? null
-                  : _save,
-              child: const Text('Usar esta imagen'),
+              onPressed: !changed || working || error != null ? null : _save,
+              child: const Text('Guardar cambios'),
             ),
             const SizedBox(height: 10),
             const Text(
-              'Se guardará en este teléfono. Después pulsa «Mostrar» para enviarla y reemplazar esa emoción en el cubo.',
+              'Los cambios quedan en el teléfono. Al pulsar «Mostrar», se sincronizan con Doc_microSD/user y luego se muestran o reproducen.',
               style: TextStyle(fontSize: 12, height: 1.5),
             ),
           ],
@@ -200,4 +374,54 @@ class _EditorScreenState extends State<EditorScreen> {
       ),
     );
   }
+}
+
+class _WaveformPainter extends CustomPainter {
+  const _WaveformPainter(
+    this.values, {
+    required this.startFraction,
+    required this.endFraction,
+  });
+  final List<double> values;
+  final double startFraction, endFraction;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final background = Paint()..color = paper.withValues(alpha: .28);
+    final selected = Paint()..color = sage;
+    final center = size.height / 2;
+    final width = size.width / values.length;
+    for (var i = 0; i < values.length; i++) {
+      final fraction = (i + .5) / values.length;
+      final height = values[i] * (size.height - 12);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(i * width + 1, center - height / 2, width - 2, height),
+          const Radius.circular(2),
+        ),
+        fraction >= startFraction && fraction <= endFraction
+            ? selected
+            : background,
+      );
+    }
+    final border = Paint()
+      ..color = orange
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawRect(
+      Rect.fromLTRB(
+        startFraction * size.width,
+        2,
+        endFraction * size.width,
+        size.height - 2,
+      ),
+      border,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _WaveformPainter oldDelegate) =>
+      oldDelegate.startFraction != startFraction ||
+      oldDelegate.endFraction != endFraction ||
+      oldDelegate.values != values;
 }

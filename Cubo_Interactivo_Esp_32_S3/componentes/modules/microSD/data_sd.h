@@ -14,6 +14,9 @@ esp_err_t data_sd_mkdir(const char *relative_dir);
 /* Unico escritor. Recupera una sustitucion interrumpida y publica con respaldo. */
 esp_err_t data_sd_recover(const char *relative_path);
 esp_err_t data_sd_replace(const char *relative_path, const uint8_t *data, size_t size);
+/* Elimina un archivo de usuario y sus temporales transaccionales. Ausente = OK. */
+esp_err_t data_sd_delete_file(const char *relative_path);
+bool data_sd_file_exists(const char *relative_path);
 
 /* Instala solo archivos ausentes; usa un temporal exclusivo y fsync. */
 esp_err_t data_sd_write_if_absent(const char *relative_path, const uint8_t *data,

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 // Hardware test: requires Cubo-ESP and factory artwork on its SD.
-// Restores the original 16 images after testing. Run only on a development cube.
+// Restores the original 6 images after testing. Run only on a development cube.
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -40,9 +40,9 @@ void main() {
         await Future<void>.delayed(const Duration(seconds: 3));
         try {
           debugPrint('HARDWARE: show factory');
-          await ble.show(6, null);
+          await ble.show(3, null, null);
           expect(ble.message, 'Imagen confirmada en el cubo');
-          final data = await rootBundle.load('assets/emotions/excited.png');
+          final data = await rootBundle.load('assets/emotions/surprise.png');
           final originalPng = data.buffer.asUint8List(
             data.offsetInBytes,
             data.lengthInBytes,
@@ -63,12 +63,16 @@ void main() {
           }
 
           ble.addListener(cancel);
-          await expectLater(ble.show(6, png), throwsStateError);
+          await expectLater(ble.show(3, png, null), throwsStateError);
           ble.removeListener(cancel);
           debugPrint('HARDWARE: upload complete image');
-          await ble.show(6, png);
+          await ble.show(3, png, null);
           expect(ble.progress, 1);
           expect(ble.message, 'Imagen confirmada en el cubo');
+          debugPrint('HARDWARE: show cached custom image');
+          await ble.show(3, png, null);
+          expect(ble.progress, 1);
+          expect(ble.message, 'Imagen recuperada de la microSD');
           debugPrint('HARDWARE: restore all');
           await ble.restore();
           expect(ble.message, 'Las 16 imágenes originales están listas');
@@ -79,7 +83,7 @@ void main() {
           await ble.connect(device);
           expect(ble.connected, true, reason: ble.error);
           await Future<void>.delayed(const Duration(seconds: 2));
-          await ble.show(0, null);
+          await ble.show(0, null, null);
         } finally {
           await ble.disconnect();
           ble.dispose();

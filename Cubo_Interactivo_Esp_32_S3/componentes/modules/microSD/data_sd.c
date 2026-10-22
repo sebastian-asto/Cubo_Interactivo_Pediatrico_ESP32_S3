@@ -329,7 +329,7 @@ esp_err_t data_sd_replace_factory_file(const char *relative_path,
 }
 
 /* FAT rename cannot overwrite. Keep .bak until .new has become the destination.
- * Recovery is per image, not an atomic transaction across all 16 images. */
+ * Recovery is per image, not an atomic transaction across all 6 images. */
 static esp_err_t transaction_paths(const char *relative, char *path, char *pending, char *backup)
 {
     esp_err_t err = make_path(relative, path);
@@ -380,5 +380,29 @@ esp_err_t data_sd_replace(const char *relative, const uint8_t *data, size_t size
     }
     if (unlink(backup) != 0 && errno != ENOENT) { ESP_LOGE(TAG, "Retirar respaldo %s: errno=%d", backup, errno); return ESP_FAIL; }
     ESP_LOGI(TAG, "SD_REEMPLAZADA: %s (%u bytes verificados)", relative, (unsigned)size);
+    return ESP_OK;
+}
+
+bool data_sd_file_exists(const char *relative)
+{
+    if (!s_card) return false;
+    char path[SD_PATH_SIZE];
+    if (make_path(relative, path) != ESP_OK) return false;
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+esp_err_t data_sd_delete_file(const char *relative)
+{
+    if (!s_card) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = data_sd_recover(relative);
+    if (err != ESP_OK) return err;
+    char path[SD_PATH_SIZE], pending[SD_PATH_SIZE], backup[SD_PATH_SIZE];
+    err = transaction_paths(relative, path, pending, backup);
+    if (err != ESP_OK) return err;
+    if (unlink(path) != 0 && errno != ENOENT) return ESP_FAIL;
+    if (unlink(pending) != 0 && errno != ENOENT) return ESP_FAIL;
+    if (unlink(backup) != 0 && errno != ENOENT) return ESP_FAIL;
+    ESP_LOGI(TAG, "SD_ELIMINADO: %s", relative);
     return ESP_OK;
 }

@@ -72,14 +72,35 @@ if (process.argv[2]) {
 }
 console.log('OK: JS syntax, RGB565 byte order, TFT1 round-trip, RAW/RLE imports, invalid files and 240x240 frame.');
 
-const emotionDir = new URL('../main/assets/emotions/', import.meta.url);
+const emotionDir = new URL('../../Doc_microSD/default/images/', import.meta.url);
 if (fs.existsSync(emotionDir)) {
+  const expectedOrder = [
+    'joy', 'sad', 'angry', 'upset', 'serious', 'sorry', 'excited', 'inlove',
+    'nervous', 'thought', 'bored', 'surprise', 'worried', 'scared', 'crying', 'proud',
+  ];
   const names = fs.readdirSync(emotionDir).filter(name => name.endsWith('.tft'));
-  assert.equal(names.length, 16);
+  const slotNames = expectedOrder.map(name => `${name}.tft`);
+  assert.deepEqual(names.sort(), slotNames.sort());
   const registry = fs.readFileSync(new URL('../main/app/emotions/emotions.c', import.meta.url), 'utf8');
+  const registryBlock = registry.slice(
+    registry.indexOf('#define EMOTION_LIST'),
+    registry.indexOf('typedef struct'),
+  );
+  const firmwareOrder = [...registryBlock.matchAll(/X\(([a-z]+),/g)].map(match => match[1]);
+  assert.deepEqual(firmwareOrder, expectedOrder, 'Firmware emotion order');
+  const appModel = fs.readFileSync(
+    new URL('../../app_control_cubo_interactivo/lib/models/emotion.dart', import.meta.url),
+    'utf8',
+  );
+  const appIdsBlock = appModel.slice(
+    appModel.indexOf('const emotionIds'),
+    appModel.indexOf('const emotionLabels'),
+  );
+  const appOrder = [...appIdsBlock.matchAll(/'([a-z]+)'/g)].map(match => match[1]);
+  assert.deepEqual(appOrder, expectedOrder, 'Flutter emotion order');
   const unique = new Set();
   for (const name of names) {
-    assert.match(name, /^[a-z]{1,8}\.tft$/, 'FAT 8.3 filename required');
+    assert.match(name, /^[a-z0-9]+\.tft$/);
     const file = fs.readFileSync(new URL(name, emotionDir));
     const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
     const decoded = context.parseTft(buffer);
@@ -87,9 +108,15 @@ if (fs.existsSync(emotionDir)) {
     assert.equal(decoded.height, 240);
     context.state = decoded;
     assert.deepEqual(Buffer.from(context.createTft()), file, `Editor round-trip: ${name}`);
-    assert.ok(registry.includes(`X(${name.slice(0, -4)},`), `Firmware registry: ${name}`);
+    const id = name.slice(0, -4);
+    assert.ok(registry.includes(`X(${id},`), `Firmware registry: ${name}`);
     unique.add(file.toString('base64'));
   }
   assert.equal(unique.size, 16, 'Every emotion must have different pixels');
-  console.log('OK: 16 distinct emotions, FAT 8.3 names, registry and exact editor import/export round-trips.');
+  const cmake = fs.readFileSync(new URL('../main/CMakeLists.txt', import.meta.url), 'utf8');
+  assert.doesNotMatch(cmake, /assets\/emotions/);
+  assert.match(registry, /Doc_microSD\/default\/images/);
+  assert.match(registry, /Doc_microSD\/user\/images/);
+  assert.match(registry, /Doc_microSD\/user\/audio/);
+  console.log('OK: 16 emotions on microSD, registries and exact editor round-trips.');
 }

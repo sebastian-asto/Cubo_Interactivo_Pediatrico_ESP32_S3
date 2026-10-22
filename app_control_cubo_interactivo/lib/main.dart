@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'services/artwork_store.dart';
 import 'services/cube_ble.dart';
-import 'screens/emotions_screen.dart';
+import 'screens/home_screen.dart';
 
 const ink = Color(0xFF171916),
     orange = Color(0xFFE5A05D),
@@ -27,6 +27,7 @@ class CubeApp extends StatelessWidget {
     required this.ble,
     this.startupError,
   });
+
   final ArtworkStore store;
   final CubeBle ble;
   final String? startupError;
@@ -69,6 +70,6 @@ class CubeApp extends StatelessWidget {
         ),
       ),
     ),
-    home: EmotionsScreen(store: store, ble: ble, startupError: startupError),
+    home: HomeScreen(store: store, ble: ble, startupError: startupError),
   );
 }

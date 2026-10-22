@@ -8,6 +8,7 @@ import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'tft_codec.dart';
+import '../models/emotion.dart';
 
 final cubeService = Uuid.parse('72a10000-6c75-426f-9000-6375626f0001');
 Uuid cubeCharacteristic(int n) =>
@@ -24,9 +25,14 @@ class CubeBle extends ChangeNotifier {
   String? deviceId;
   String? error;
   String message = 'Conecta tu cubo para comenzar';
-  bool scanning = false, connecting = false, busy = false, sdReady = false;
+  bool scanning = false,
+      connecting = false,
+      busy = false,
+      sdReady = false,
+      audioReady = false;
   bool _cancel = false;
-  int _sequence = 0, _mtu = 23, _generation = 0;
+  int _sequence = 0, _mtu = 23, _generation = 0, _protocolVersion = 0;
+  int volume = 65;
   double progress = 0;
   bool get connected => deviceId != null;
 
@@ -151,6 +157,8 @@ class CubeBle extends ChangeNotifier {
                 DeviceConnectionState.disconnected) {
               deviceId = null;
               sdReady = false;
+              audioReady = false;
+              _protocolVersion = 0;
               message = 'Cubo desconectado';
               if (!complete.isCompleted) {
                 complete.completeError(
@@ -164,6 +172,8 @@ class CubeBle extends ChangeNotifier {
             if (generation != _generation) return;
             deviceId = null;
             sdReady = false;
+            audioReady = false;
+            _protocolVersion = 0;
             error = userError(e);
             if (!complete.isCompleted) complete.completeError(e);
             notifyListeners();
@@ -208,10 +218,18 @@ class CubeBle extends ChangeNotifier {
           await Future<void>.delayed(const Duration(milliseconds: 700));
         }
       }
-      if (status.length != 16 || status[0] != 1 || status[15] != 16) {
+      if (status.length != 16 ||
+          status[0] != 4 ||
+          status[15] != emotionIds.length) {
         throw StateError('Firmware incompatible con esta app.');
       }
+      _protocolVersion = status[0];
       sdReady = (status[14] & 1) != 0;
+      audioReady = (status[14] & 4) != 0;
+      if (audioReady) {
+        final volumeStatus = await _command(13);
+        volume = volumeStatus[5].clamp(0, 100);
+      }
       message = sdReady
           ? 'Cubo conectado · listo'
           : 'Cubo conectado · microSD no disponible';
@@ -233,12 +251,14 @@ class CubeBle extends ChangeNotifier {
     _connection = null;
     deviceId = null;
     sdReady = false;
+    audioReady = false;
+    _protocolVersion = 0;
     connecting = false;
     message = 'Cubo desconectado';
     notifyListeners();
   }
 
-  Future<void> _command(
+  Future<Uint8List> _command(
     int op, {
     int index = 0,
     int length = 0,
@@ -271,11 +291,9 @@ class CubeBle extends ChangeNotifier {
           status[4] == op &&
           status[1] != 1) {
         if (status[1] != 0) {
-          throw StateError(
-            'El cubo no completó la operación (0x${s.getUint32(6, Endian.little).toRadixString(16)}). Revisa la microSD y vuelve a intentar.',
-          );
+          throw CubeCommandException(s.getUint32(6, Endian.little));
         }
-        return;
+        return Uint8List.fromList(status);
       }
       await Future<void>.delayed(const Duration(milliseconds: 120));
     }
@@ -288,7 +306,44 @@ class CubeBle extends ChangeNotifier {
     _cancel = true;
   }
 
-  Future<void> show(int index, Uint8List? png) async {
+  Future<void> _uploadResource({
+    required int beginOp,
+    required int commitOp,
+    required int index,
+    required Uint8List bytes,
+    required String label,
+  }) async {
+    final checksum = crc32(bytes);
+    await _command(beginOp, index: index, length: bytes.length, crc: checksum);
+    final chunk = max(1, min(_mtu - 3, 244) - 4);
+    for (var offset = 0; offset < bytes.length;) {
+      if (_cancel) {
+        throw StateError('Envío cancelado; el recurso anterior se conserva.');
+      }
+      if (!connected) {
+        throw StateError('Se desconectó el cubo. Vuelve a enviar.');
+      }
+      final count = min(chunk, bytes.length - offset);
+      final packet = Uint8List(4 + count);
+      ByteData.sublistView(packet).setUint32(0, offset, Endian.little);
+      packet.setRange(4, packet.length, bytes, offset);
+      await _ble
+          .writeCharacteristicWithResponse(_char(2), value: packet)
+          .timeout(const Duration(seconds: 8));
+      offset += count;
+      progress = offset / bytes.length;
+      message = 'Enviando $label · ${(progress * 100).round()} %';
+      notifyListeners();
+    }
+    await _command(commitOp, index: index);
+  }
+
+  Future<void> show(
+    int index,
+    Uint8List? png,
+    Uint8List? wav, {
+    bool removeAudio = false,
+  }) async {
     if (busy) return;
     if (!connected || !sdReady) {
       throw StateError('Conecta un cubo con microSD disponible.');
@@ -299,9 +354,53 @@ class CubeBle extends ChangeNotifier {
     message = 'Preparando imagen…';
     notifyListeners();
     try {
+      if (wav != null) {
+        if (!audioReady) {
+          throw StateError('El audio del cubo no está disponible.');
+        }
+        final checksum = crc32(wav);
+        message = 'Comprobando audio en la microSD…';
+        notifyListeners();
+        try {
+          await _command(11, index: index, length: wav.length, crc: checksum);
+        } on CubeCommandException catch (e) {
+          if (e.code != 0x109 && e.code != 0x105) rethrow;
+          await _uploadResource(
+            beginOp: 8,
+            commitOp: 9,
+            index: index,
+            bytes: wav,
+            label: 'audio',
+          );
+        }
+      } else if (removeAudio) {
+        await _command(10, index: index);
+      }
+      progress = 0;
       if (png == null) {
         await _command(6, index: index);
       } else {
+        final bytes = await compute(pngToTft, png);
+        final checksum = crc32(bytes);
+        if (_protocolVersion >= 2) {
+          message = 'Comprobando imagen en la microSD…';
+          notifyListeners();
+          try {
+            await _command(
+              7,
+              index: index,
+              length: bytes.length,
+              crc: checksum,
+            );
+            message = 'Imagen recuperada de la microSD';
+            progress = 1;
+            return;
+          } on CubeCommandException catch (e) {
+            // ESP_ERR_INVALID_CRC means that this slot contains another image.
+            // Any other error is a real SD/display failure and must be reported.
+            if (e.code != 0x109 && e.code != 0x105) rethrow;
+          }
+        }
         if (Platform.isAndroid && connected) {
           try {
             await _ble.requestConnectionPriority(
@@ -310,43 +409,13 @@ class CubeBle extends ChangeNotifier {
             );
           } catch (_) {}
         }
-        final bytes = await compute(pngToTft, png);
-        await _command(
-          2,
+        await _uploadResource(
+          beginOp: 2,
+          commitOp: 3,
           index: index,
-          length: bytes.length,
-          crc: crc32(bytes),
+          bytes: bytes,
+          label: 'imagen',
         );
-        final chunk = min(_mtu - 3, 244) - 4;
-        for (var offset = 0; offset < bytes.length;) {
-          if (_cancel) {
-            throw StateError(
-              'Envío cancelado. La imagen anterior se conserva.',
-            );
-          }
-          if (!connected) {
-            throw StateError(
-              'Se desconectó el cubo. Vuelve a enviar la imagen.',
-            );
-          }
-          final count = min(chunk, bytes.length - offset);
-          final packet = Uint8List(4 + count);
-          ByteData.sublistView(packet).setUint32(0, offset, Endian.little);
-          packet.setRange(4, packet.length, bytes, offset);
-          await _ble
-              .writeCharacteristicWithResponse(_char(2), value: packet)
-              .timeout(const Duration(seconds: 8));
-          offset += count;
-          progress = offset / bytes.length;
-          message = 'Enviando imagen · ${(progress * 100).round()} %';
-          notifyListeners();
-        }
-        if (_cancel) {
-          throw StateError('Envío cancelado. La imagen anterior se conserva.');
-        }
-        message = 'Guardando y mostrando…';
-        notifyListeners();
-        await _command(3, index: index);
       }
       message = 'Imagen confirmada en el cubo';
       progress = 1;
@@ -388,6 +457,42 @@ class CubeBle extends ChangeNotifier {
     }
   }
 
+  Future<void> removeAllAudio() async {
+    if (busy || !connected || !sdReady) {
+      throw StateError('Conecta el cubo con su microSD antes de continuar.');
+    }
+    busy = true;
+    try {
+      for (var i = 0; i < emotionIds.length; i++) {
+        message = 'Quitando audios · ${i + 1}/${emotionIds.length}';
+        notifyListeners();
+        await _command(10, index: i);
+      }
+      message = 'Los audios personalizados fueron eliminados';
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> setVolume(int value) async {
+    if (busy || !connected || !audioReady) {
+      throw StateError('Conecta un cubo con audio disponible.');
+    }
+    final next = value.clamp(0, 100);
+    busy = true;
+    message = 'Ajustando volumen…';
+    notifyListeners();
+    try {
+      await _command(12, length: next);
+      volume = next;
+      message = 'Volumen del cubo: $next %';
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
   @override
   void dispose() {
     _scanTimer?.cancel();
@@ -396,6 +501,15 @@ class CubeBle extends ChangeNotifier {
     _connectionEvents?.cancel();
     super.dispose();
   }
+}
+
+class CubeCommandException implements Exception {
+  const CubeCommandException(this.code);
+
+  final int code;
+
+  @override
+  String toString() => 'CubeCommandException(0x${code.toRadixString(16)})';
 }
 
 String userError(Object error) {
@@ -410,5 +524,8 @@ String userError(Object error) {
     return 'No se pudo completar la conexión Bluetooth. Comprueba que el cubo siga encendido y vuelve a intentar.';
   }
   if (error is FormatException) return error.message;
+  if (error is CubeCommandException) {
+    return 'El cubo no completó la operación (0x${error.code.toRadixString(16)}). Revisa la microSD y vuelve a intentar.';
+  }
   return 'No se pudo completar la operación. Vuelve a intentarlo.';
 }

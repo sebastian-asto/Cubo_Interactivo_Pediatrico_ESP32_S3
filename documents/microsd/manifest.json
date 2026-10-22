@@ -1,0 +1,32 @@
+[
+  {
+    "file": "joy.tft",
+    "emotion": "ESTOY FELIZ",
+    "bytes": 115208
+  },
+  {
+    "file": "sad.tft",
+    "emotion": "ESTOY TRISTE",
+    "bytes": 115208
+  },
+  {
+    "file": "angry.tft",
+    "emotion": "ESTOY ENOJADO",
+    "bytes": 115208
+  },
+  {
+    "file": "surprise.tft",
+    "emotion": "ESTOY SORPRENDIDO",
+    "bytes": 115208
+  },
+  {
+    "file": "scared.tft",
+    "emotion": "ESTOY ASUSTADO",
+    "bytes": 115208
+  },
+  {
+    "file": "inlove.tft",
+    "emotion": "ESTOY ENAMORADO",
+    "bytes": 115208
+  }
+]

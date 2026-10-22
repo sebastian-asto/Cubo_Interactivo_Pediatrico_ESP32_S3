@@ -10,13 +10,10 @@ idf_component_register(
     "app/emotions"
     "app/ble"
 
-    REQUIRES st7789 microSD mbedtls bt nvs_flash)
+    REQUIRES st7789 microSD audio bt nvs_flash)
 
-# Semillas de fabrica: el primer arranque las copia a la microSD si faltan.
-file(GLOB EMOTION_IMAGES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/assets/emotions/*.tft")
-foreach(EMOTION_IMAGE IN LISTS EMOTION_IMAGES)
-    target_add_binary_data(${COMPONENT_LIB} "${EMOTION_IMAGE}" BINARY)
-endforeach()
+# Desde V1.5.0 las 16 caras de fabrica viven en
+# /Doc_microSD/default/images. No se duplican dentro de la flash.
 
 # La imagen se guarda en la flash junto con la aplicacion, sin montar SPIFFS.
 # Reconfigurar despues de agregar o quitar assets/drawing.tft.

@@ -3,7 +3,6 @@ import '../main.dart';
 import '../models/emotion.dart';
 import '../services/artwork_store.dart';
 import '../services/cube_ble.dart';
-import 'scanner_screen.dart';
 import 'editor_screen.dart';
 
 class EmotionsScreen extends StatefulWidget {
@@ -12,10 +11,12 @@ class EmotionsScreen extends StatefulWidget {
     required this.store,
     required this.ble,
     this.startupError,
+    this.onDevice,
   });
   final ArtworkStore store;
   final CubeBle ble;
   final String? startupError;
+  final VoidCallback? onDevice;
   @override
   State<EmotionsScreen> createState() => _EmotionsScreenState();
 }
@@ -44,7 +45,14 @@ class _EmotionsScreenState extends State<EmotionsScreen> {
   );
   Future<void> _show() async {
     try {
-      await widget.ble.show(selected, widget.store.custom[selected]);
+      final removingAudio = widget.store.audioRemoved.contains(selected);
+      await widget.ble.show(
+        selected,
+        widget.store.custom[selected],
+        widget.store.audio[selected],
+        removeAudio: removingAudio,
+      );
+      if (removingAudio) await widget.store.confirmAudioRemoval(selected);
       if (mounted) {
         _notice(
           'El cubo está mostrando: ${emotionLabels[selected].toLowerCase()}.',
@@ -52,43 +60,6 @@ class _EmotionsScreenState extends State<EmotionsScreen> {
       }
     } catch (e) {
       if (mounted) _notice(userError(e));
-    }
-  }
-
-  Future<void> _reset() async {
-    final yes = await showDialog<bool>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('¿Volver a las 16 caras originales?'),
-        content: const Text(
-          'Se reemplazarán las imágenes personalizadas del cubo y de este teléfono. El cubo mostrará «Estoy feliz» al terminar.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(c, false),
-            child: const Text('Conservar'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(c, true),
-            child: const Text('Restablecer'),
-          ),
-        ],
-      ),
-    );
-    if (yes != true) return;
-    try {
-      await widget.ble.restore();
-      await widget.store.clear();
-      if (mounted) {
-        setState(() => selected = 0);
-        _notice('Las 16 caras originales están listas.');
-      }
-    } catch (e) {
-      if (mounted) {
-        _notice(
-          'No se completó el restablecimiento. Puedes reintentarlo. ${userError(e)}',
-        );
-      }
     }
   }
 
@@ -125,14 +96,7 @@ class _EmotionsScreenState extends State<EmotionsScreen> {
 
                           IconButton(
                             tooltip: 'Buscar y conectar cubo',
-                            onPressed: ble.busy
-                                ? null
-                                : () => Navigator.push(
-                                    context,
-                                    MaterialPageRoute<void>(
-                                      builder: (_) => ScannerScreen(ble: ble),
-                                    ),
-                                  ),
+                            onPressed: ble.busy ? null : widget.onDevice,
                             icon: Icon(
                               ble.connected
                                   ? Icons.bluetooth_connected
@@ -216,14 +180,7 @@ class _EmotionsScreenState extends State<EmotionsScreen> {
                             ),
                           ),
                           TextButton(
-                            onPressed: ble.busy
-                                ? null
-                                : () => Navigator.push(
-                                    context,
-                                    MaterialPageRoute<void>(
-                                      builder: (_) => ScannerScreen(ble: ble),
-                                    ),
-                                  ),
+                            onPressed: ble.busy ? null : widget.onDevice,
                             child: Text(
                               ble.connected ? 'Ver cubo' : 'Conectar ↗',
                             ),
@@ -247,7 +204,7 @@ class _EmotionsScreenState extends State<EmotionsScreen> {
                             ),
 
                             Text(
-                              '16 caras · 1 selección',
+                              '16 emociones · 1 selección',
                               style: TextStyle(
                                 fontSize: 10,
                                 color: paper.withValues(alpha: .6),
@@ -475,17 +432,6 @@ class _EmotionsScreenState extends State<EmotionsScreen> {
                             ),
                           ),
                         ),
-                      TextButton.icon(
-                        onPressed: ble.busy || !ble.connected || !ble.sdReady
-                            ? null
-                            : _reset,
-                        icon: const Icon(Icons.restart_alt, size: 17),
-                        label: const Text(
-                          'Restablecer las 16 imágenes',
-                          style: TextStyle(fontSize: 12),
-                        ),
-                        style: TextButton.styleFrom(foregroundColor: paper),
-                      ),
                     ],
                   ),
                 ),

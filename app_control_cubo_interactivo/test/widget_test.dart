@@ -19,6 +19,8 @@ void main() {
     final store = ArtworkStore();
     await tester.pumpWidget(CubeApp(store: store, ble: ble));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('Emociones'));
+    await tester.pumpAndSettle();
     expect(find.text('Estoy feliz'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('emotion-1')));
     await tester.pumpAndSettle();
@@ -61,9 +63,9 @@ void main() {
     tester.view.physicalSize = const Size(320, 568);
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    await tester.tap(find.text('Conectar ↗'));
+    await tester.tap(find.text('Emociones'));
     await tester.pumpAndSettle();
-    expect(find.text('Buscar Cubo-ESP'), findsOneWidget);
+    expect(find.text('CUBO / EMOCIONES'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

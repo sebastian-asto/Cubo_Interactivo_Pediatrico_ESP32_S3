@@ -8,13 +8,14 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "audio_player.h"
 #include "emotions.h"
-#include "tft_st7789.h"
 
 void ble_store_config_init(void);
 
@@ -22,37 +23,42 @@ void ble_store_config_init(void);
 #define UUID(n)                                                                                    \
     BLE_UUID128_INIT(1, 0, 0x6f, 0x62, 0x75, 0x63, 0, 0x90, 0x6f, 0x42, 0x75, 0x6c, n, 0, 0xa1,    \
                      0x72)
-static const ble_uuid128_t service_uuid = UUID(0), command_uuid = UUID(1), data_uuid = UUID(2),
-                           status_uuid = UUID(3);
+
+static const ble_uuid128_t service_uuid = UUID(0), command_uuid = UUID(1),
+                           data_uuid = UUID(2), status_uuid = UUID(3);
 static SemaphoreHandle_t lock;
 static QueueHandle_t queue;
 static uint8_t own_type;
 static uint16_t connection = BLE_HS_CONN_HANDLE_NONE;
 static uint32_t connection_generation;
-static bool ready;
+static bool ready, audio_ready;
 /* status: version, result(0 OK/1 BUSY/2 ERROR), seqLE16, op, selected,
- * errLE32, receivedLE32, sd_ready, emotion_count. */
-static uint8_t status[16] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16};
+ * errLE32, receivedLE32, flags(bit0 SD, bit1 cifrado, bit2 audio), count. */
+static uint8_t status[16] = {4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16};
 static uint8_t *upload;
-static uint32_t received, expected_crc;
-static uint8_t upload_index;
+static uint32_t received, expected_crc, expected_size;
+static uint8_t upload_index, upload_op;
 static TickType_t last_chunk;
 static const size_t image_size = 115208;
+
 typedef struct
 {
     uint8_t bytes[12];
     uint16_t owner;
     uint32_t generation;
 } command_t;
+
 static uint32_t le32(const uint8_t *p)
 {
-    return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
 }
+
 static void put32(uint8_t *p, uint32_t x)
 {
-    for (int i = 0; i < 4; i++)
-        p[i] = x >> (i * 8);
+    for (int i = 0; i < 4; i++) p[i] = x >> (i * 8);
 }
+
 static uint32_t crc32(const uint8_t *p, size_t n)
 {
     uint32_t c = 0xffffffff;
@@ -64,12 +70,54 @@ static uint32_t crc32(const uint8_t *p, size_t n)
     }
     return ~c;
 }
+
+static esp_err_t save_volume(uint8_t volume)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("cube_cfg", NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(handle, "volume", volume);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+static void restore_volume(void)
+{
+    if (!audio_ready) return;
+    nvs_handle_t handle;
+    uint8_t volume = 65;
+    if (nvs_open("cube_cfg", NVS_READONLY, &handle) == ESP_OK) {
+        if (nvs_get_u8(handle, "volume", &volume) != ESP_OK || volume > 100) {
+            volume = 65;
+        }
+        nvs_close(handle);
+    }
+    audio_player_set_volume(volume);
+}
+
+static uint8_t flags(bool encrypted)
+{
+    return (ready ? 1 : 0) | (encrypted ? 2 : 0) | (audio_ready ? 4 : 0);
+}
+
 static void discard(void)
 {
     free(upload);
     upload = NULL;
     received = 0;
+    expected_size = 0;
+    upload_op = 0;
 }
+
+static esp_err_t show_and_play(uint8_t index, bool check_crc, uint32_t crc)
+{
+    esp_err_t err = check_crc ? emotions_show_if_crc(index, crc) : emotions_show(index);
+    if (err != ESP_OK) return err;
+    err = emotions_play_audio(index);
+    return err == ESP_ERR_NOT_FOUND ? ESP_OK : err;
+}
+
 static void worker(void *arg)
 {
     command_t cmd;
@@ -83,41 +131,51 @@ static void worker(void *arg)
             xSemaphoreGive(lock);
             continue;
         }
+
         uint8_t op = cmd.bytes[0], idx = cmd.bytes[3];
         esp_err_t err = ESP_OK;
-        uint8_t *image = NULL;
+        uint8_t *resource = NULL;
+        uint32_t resource_size = 0;
         xSemaphoreTake(lock, portMAX_DELAY);
         if (cmd.owner != connection || cmd.generation != connection_generation)
             err = ESP_ERR_INVALID_STATE;
-        else if (!ready && op != 5)
+        else if (!ready && op != 5 && op != 12 && op != 13)
             err = ESP_ERR_INVALID_STATE;
-        else if (op == 2)
+        else if (op == 2 || op == 8)
         {
             discard();
-            if (idx >= 16 || le32(cmd.bytes + 4) != image_size)
+            uint32_t requested = le32(cmd.bytes + 4);
+            bool valid_size = op == 2 ? requested == image_size :
+                requested >= 45 && requested <= AUDIO_WAV_MAX_BYTES;
+            if (!valid_size || (op == 8 && !audio_ready))
                 err = ESP_ERR_INVALID_SIZE;
             else
             {
-                upload = heap_caps_malloc(image_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                upload = heap_caps_malloc(requested, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 if (!upload)
                     err = ESP_ERR_NO_MEM;
                 else
                 {
                     upload_index = idx;
+                    upload_op = op;
+                    expected_size = requested;
                     expected_crc = le32(cmd.bytes + 8);
                     last_chunk = xTaskGetTickCount();
                 }
             }
         }
-        else if (op == 3)
+        else if (op == 3 || op == 9)
         {
-            if (!upload || received != image_size || crc32(upload, received) != expected_crc)
+            uint8_t required_begin = op == 3 ? 2 : 8;
+            if (!upload || upload_op != required_begin || received != expected_size ||
+                crc32(upload, received) != expected_crc)
                 err = ESP_ERR_INVALID_CRC;
             else
             {
-                image = upload;
+                resource = upload;
                 upload = NULL;
                 idx = upload_index;
+                resource_size = expected_size;
             }
             discard();
         }
@@ -126,43 +184,71 @@ static void worker(void *arg)
         else if (upload)
             err = ESP_ERR_INVALID_STATE;
         xSemaphoreGive(lock);
-        /* Only this task uses SD and LCD after startup. Never block the BLE host on IO. */
+
+        /* Only this task uses SD, LCD and audio after startup. */
         if (err == ESP_OK)
         {
             if (op == 1)
-                err = emotions_show(idx);
+                err = show_and_play(idx, false, 0);
             else if (op == 3)
             {
-                err = emotions_replace(idx, image, image_size);
-                if (err == ESP_OK)
-                    err = emotions_show(idx);
+                err = emotions_replace(idx, resource, resource_size);
+                if (err == ESP_OK) err = show_and_play(idx, false, 0);
             }
             else if (op == 4)
             {
                 for (size_t i = 0; i < emotions_count() && err == ESP_OK; i++)
                     err = emotions_restore(i);
                 idx = 0;
-                if (err == ESP_OK)
-                    err = emotions_show(idx);
+                if (err == ESP_OK) err = show_and_play(idx, false, 0);
             }
             else if (op == 6)
             {
                 err = emotions_restore(idx);
-                if (err == ESP_OK)
-                    err = emotions_show(idx);
+                if (err == ESP_OK) err = show_and_play(idx, false, 0);
+            }
+            else if (op == 7)
+                err = show_and_play(idx, true, le32(cmd.bytes + 8));
+            else if (op == 9)
+                err = emotions_audio_replace(idx, resource, resource_size);
+            else if (op == 10)
+                err = emotions_audio_restore(idx);
+            else if (op == 11)
+                err = emotions_audio_matches(idx, le32(cmd.bytes + 8));
+            else if (op == 12)
+            {
+                uint32_t requested = le32(cmd.bytes + 4);
+                if (!audio_ready || requested > 100)
+                    err = ESP_ERR_INVALID_ARG;
+                else
+                {
+                    err = audio_player_set_volume((uint8_t)requested);
+                    if (err == ESP_OK) err = save_volume((uint8_t)requested);
+                }
+            }
+            else if (op == 13)
+            {
+                if (!audio_ready)
+                    err = ESP_ERR_INVALID_STATE;
+                else
+                    idx = audio_player_get_volume();
             }
         }
-        free(image);
+        free(resource);
+
         xSemaphoreTake(lock, portMAX_DELAY);
-        if (err == ESP_OK && (op == 1 || op == 3 || op == 4 || op == 6))
+        if (err == ESP_OK && (op == 1 || op == 3 || op == 4 || op == 6 || op == 7 || op == 13))
             status[5] = idx;
         status[1] = err == ESP_OK ? 0 : 2;
         put32(status + 6, (uint32_t)err);
         xSemaphoreGive(lock);
-        ESP_LOGI("CUBE_BLE", "op=%u emotion=%u result=%s", op, idx, esp_err_to_name(err));
+        ESP_LOGI("CUBE_BLE", "op=%u emotion=%u result=%s",
+                 op, idx, esp_err_to_name(err));
     }
 }
-static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctx, void *arg)
+
+static int access_cb(uint16_t conn, uint16_t attr,
+                     struct ble_gatt_access_ctxt *ctx, void *arg)
 {
     uintptr_t kind = (uintptr_t)arg;
     int rc = 0;
@@ -170,18 +256,20 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
     if (kind == 3)
     {
         put32(status + 10, received);
-        rc = os_mbuf_append(ctx->om, status, sizeof status) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        rc = os_mbuf_append(ctx->om, status, sizeof status) == 0
+            ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     else
     {
         uint16_t len = OS_MBUF_PKTLEN(ctx->om);
         uint8_t packet[512];
-        if (len > sizeof packet || ble_hs_mbuf_to_flat(ctx->om, packet, sizeof packet, NULL) != 0)
+        if (len > sizeof packet ||
+            ble_hs_mbuf_to_flat(ctx->om, packet, sizeof packet, NULL) != 0)
             rc = BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         else if (kind == 2)
         {
-            if (status[1] == 1 || !upload || len < 5 || le32(packet) != received ||
-                len - 4 > image_size - received)
+            if (status[1] == 1 || !upload || len < 5 ||
+                le32(packet) != received || len - 4 > expected_size - received)
                 rc = BLE_ATT_ERR_UNLIKELY;
             else
             {
@@ -190,7 +278,8 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
                 last_chunk = xTaskGetTickCount();
             }
         }
-        else if (len != 12 || packet[0] < 1 || packet[0] > 6 || packet[3] >= 16)
+        else if (len != 12 || packet[0] < 1 || packet[0] > 13 ||
+                 packet[3] >= emotions_count())
             rc = BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         else if (status[1] == 1)
             rc = BLE_ATT_ERR_INSUFFICIENT_RES;
@@ -213,6 +302,7 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
     xSemaphoreGive(lock);
     return rc;
 }
+
 static const struct ble_gatt_svc_def services[] = {
     {.type = BLE_GATT_SVC_TYPE_PRIMARY,
      .uuid = &service_uuid.u,
@@ -231,7 +321,9 @@ static const struct ble_gatt_svc_def services[] = {
                                       .flags = BLE_GATT_CHR_F_READ},
                                      {0}}},
     {0}};
+
 static void advertise(void);
+
 static int gap_event(struct ble_gap_event *ev, void *arg)
 {
     if (ev->type == BLE_GAP_EVENT_CONNECT)
@@ -240,7 +332,7 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         {
             xSemaphoreTake(lock, portMAX_DELAY);
             connection = ev->connect.conn_handle;
-            status[14] = ready ? 1 : 0;
+            status[14] = flags(false);
             xSemaphoreGive(lock);
             int rc = ble_gap_security_initiate(ev->connect.conn_handle);
             ESP_LOGI("CUBE_BLE", "Conectado, iniciar cifrado: %d", rc);
@@ -252,7 +344,7 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
     {
         xSemaphoreTake(lock, portMAX_DELAY);
         connection = BLE_HS_CONN_HANDLE_NONE;
-        status[14] = ready ? 1 : 0;
+        status[14] = flags(false);
         ++connection_generation;
         discard();
         xSemaphoreGive(lock);
@@ -265,7 +357,7 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
                          ble_gap_conn_find(ev->enc_change.conn_handle, &desc) == 0 &&
                          desc.sec_state.encrypted;
         xSemaphoreTake(lock, portMAX_DELAY);
-        status[14] = (ready ? 1 : 0) | (encrypted ? 2 : 0);
+        status[14] = flags(encrypted);
         xSemaphoreGive(lock);
         ESP_LOGI("CUBE_BLE", "Cifrado=%d status=%d", encrypted, ev->enc_change.status);
     }
@@ -280,50 +372,55 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         advertise();
     return 0;
 }
+
 static void advertise(void)
 {
-    struct ble_hs_adv_fields f = {0};
-    f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    f.uuids128 = (ble_uuid128_t *)&service_uuid;
-    f.num_uuids128 = 1;
-    f.uuids128_is_complete = 1;
-    int rc = ble_gap_adv_set_fields(&f);
+    struct ble_hs_adv_fields fields = {0};
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.uuids128 = (ble_uuid128_t *)&service_uuid;
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
+    int rc = ble_gap_adv_set_fields(&fields);
     struct ble_hs_adv_fields scan = {0};
     scan.name = (uint8_t *)"Cubo-ESP";
     scan.name_len = 8;
     scan.name_is_complete = 1;
+    if (!rc) rc = ble_gap_adv_rsp_set_fields(&scan);
+    struct ble_gap_adv_params parameters = {
+        .conn_mode = BLE_GAP_CONN_MODE_UND,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+    };
     if (!rc)
-        rc = ble_gap_adv_rsp_set_fields(&scan);
-    struct ble_gap_adv_params p = {.conn_mode = BLE_GAP_CONN_MODE_UND,
-                                   .disc_mode = BLE_GAP_DISC_MODE_GEN};
-    if (!rc)
-        rc = ble_gap_adv_start(own_type, NULL, BLE_HS_FOREVER, &p, gap_event, NULL);
+        rc = ble_gap_adv_start(own_type, NULL, BLE_HS_FOREVER,
+                               &parameters, gap_event, NULL);
     ESP_LOGI("CUBE_BLE", "Advertising Cubo-ESP: %d", rc);
 }
+
 static void sync_cb(void)
 {
-    if (ble_hs_id_infer_auto(0, &own_type) == 0)
-        advertise();
+    if (ble_hs_id_infer_auto(0, &own_type) == 0) advertise();
 }
+
 static void host_task(void *p)
 {
     nimble_port_run();
     nimble_port_freertos_deinit();
 }
-esp_err_t cube_ble_start(bool sd_ready)
+
+esp_err_t cube_ble_start(bool sd_ready, bool codec_ready)
 {
     ready = sd_ready;
-    status[14] = sd_ready;
+    audio_ready = codec_ready;
+    status[14] = flags(false);
+    status[15] = (uint8_t)emotions_count();
     lock = xSemaphoreCreateMutex();
     queue = xQueueCreate(1, sizeof(command_t));
-    if (!lock || !queue)
-        return ESP_ERR_NO_MEM;
+    if (!lock || !queue) return ESP_ERR_NO_MEM;
     esp_err_t err = nvs_flash_init();
-    if (err != ESP_OK)
-        return err; /* Never erase user NVS implicitly. */
+    if (err != ESP_OK) return err; /* Never erase user NVS implicitly. */
+    restore_volume();
     err = nimble_port_init();
-    if (err != ESP_OK)
-        return err;
+    if (err != ESP_OK) return err;
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_svc_gap_device_name_set("Cubo-ESP");
@@ -335,7 +432,6 @@ esp_err_t cube_ble_start(bool sd_ready)
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
     ble_store_config_init();
-    /* Just Works with persistent keys; this is not exclusive device ownership. */
     if (ble_gatts_count_cfg(services) || ble_gatts_add_svcs(services))
         return ESP_FAIL;
     if (xTaskCreate(worker, "cube_commands", 6144, NULL, 5, NULL) != pdPASS)

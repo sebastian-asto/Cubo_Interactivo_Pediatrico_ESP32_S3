@@ -1,0 +1,161 @@
+{
+  "version": "1.5.0",
+  "screen": {
+    "width": 240,
+    "height": 240,
+    "pixel_format": "RGB565_BE"
+  },
+  "audio": {
+    "format": "WAV PCM",
+    "sample_rate": 16000,
+    "channels": 1,
+    "bits_per_sample": 8,
+    "max_seconds": 15
+  },
+  "emotions": [
+    {
+      "index": 0,
+      "id": "joy",
+      "label": "FELIZ",
+      "default_image": "default/images/joy.tft",
+      "user_image": "user/images/joy.tft",
+      "user_audio": "user/audio/joy.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 1,
+      "id": "sad",
+      "label": "TRISTE",
+      "default_image": "default/images/sad.tft",
+      "user_image": "user/images/sad.tft",
+      "user_audio": "user/audio/sad.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 2,
+      "id": "angry",
+      "label": "ENFADADO",
+      "default_image": "default/images/angry.tft",
+      "user_image": "user/images/angry.tft",
+      "user_audio": "user/audio/angry.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 3,
+      "id": "upset",
+      "label": "MOLESTO",
+      "default_image": "default/images/upset.tft",
+      "user_image": "user/images/upset.tft",
+      "user_audio": "user/audio/upset.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 4,
+      "id": "serious",
+      "label": "SERIO",
+      "default_image": "default/images/serious.tft",
+      "user_image": "user/images/serious.tft",
+      "user_audio": "user/audio/serious.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 5,
+      "id": "sorry",
+      "label": "AVERGONZADO",
+      "default_image": "default/images/sorry.tft",
+      "user_image": "user/images/sorry.tft",
+      "user_audio": "user/audio/sorry.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 6,
+      "id": "excited",
+      "label": "EMOCIONADO",
+      "default_image": "default/images/excited.tft",
+      "user_image": "user/images/excited.tft",
+      "user_audio": "user/audio/excited.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 7,
+      "id": "inlove",
+      "label": "ENAMORADO",
+      "default_image": "default/images/inlove.tft",
+      "user_image": "user/images/inlove.tft",
+      "user_audio": "user/audio/inlove.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 8,
+      "id": "nervous",
+      "label": "NERVIOSO",
+      "default_image": "default/images/nervous.tft",
+      "user_image": "user/images/nervous.tft",
+      "user_audio": "user/audio/nervous.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 9,
+      "id": "thought",
+      "label": "PENSATIVO",
+      "default_image": "default/images/thought.tft",
+      "user_image": "user/images/thought.tft",
+      "user_audio": "user/audio/thought.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 10,
+      "id": "bored",
+      "label": "ABURRIDO",
+      "default_image": "default/images/bored.tft",
+      "user_image": "user/images/bored.tft",
+      "user_audio": "user/audio/bored.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 11,
+      "id": "surprise",
+      "label": "SORPRENDIDO",
+      "default_image": "default/images/surprise.tft",
+      "user_image": "user/images/surprise.tft",
+      "user_audio": "user/audio/surprise.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 12,
+      "id": "worried",
+      "label": "PREOCUPADO",
+      "default_image": "default/images/worried.tft",
+      "user_image": "user/images/worried.tft",
+      "user_audio": "user/audio/worried.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 13,
+      "id": "scared",
+      "label": "ASUSTADO",
+      "default_image": "default/images/scared.tft",
+      "user_image": "user/images/scared.tft",
+      "user_audio": "user/audio/scared.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 14,
+      "id": "crying",
+      "label": "DEPRIMIDO",
+      "default_image": "default/images/crying.tft",
+      "user_image": "user/images/crying.tft",
+      "user_audio": "user/audio/crying.wav",
+      "image_bytes": 115208
+    },
+    {
+      "index": 15,
+      "id": "proud",
+      "label": "ORGULLOSO",
+      "default_image": "default/images/proud.tft",
+      "user_image": "user/images/proud.tft",
+      "user_audio": "user/audio/proud.wav",
+      "image_bytes": 115208
+    }
+  ]
+}
