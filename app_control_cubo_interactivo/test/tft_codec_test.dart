@@ -21,6 +21,10 @@ void main() {
       () => encodeTft(img.Image(width: 1, height: 1)),
       throwsArgumentError,
     );
+    final recovered = img.decodePng(tftToPng(bytes))!;
+    expect(recovered.getPixel(0, 0).r, 255);
+    expect(recovered.getPixel(1, 0).g, 255);
+    expect(recovered.getPixel(2, 0).b, 255);
   });
   test('Ajustar foto conserva proporción y genera archivo válido', () {
     final wide = img.Image(width: 480, height: 120);

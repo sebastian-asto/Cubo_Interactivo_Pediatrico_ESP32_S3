@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -14,7 +15,21 @@ final cubeService = Uuid.parse('72a10000-6c75-426f-9000-6375626f0001');
 Uuid cubeCharacteristic(int n) =>
     Uuid.parse('72a1000$n-6c75-426f-9000-6375626f0001');
 
+class CubeSyncResult {
+  const CubeSyncResult({
+    required this.imageMask,
+    required this.audioMask,
+    required this.images,
+  });
+
+  final int imageMask, audioMask;
+  final Map<int, Uint8List> images;
+}
+
 class CubeBle extends ChangeNotifier {
+  static const int _requestedMtu = 517;
+  static const int _maximumAttributeValue = 512;
+  static const int _resourceOffsetBytes = 4;
   late final FlutterReactiveBle _ble = FlutterReactiveBle();
   final Map<String, DiscoveredDevice> devices = {};
   StreamSubscription<DiscoveredDevice>? _scan;
@@ -35,6 +50,7 @@ class CubeBle extends ChangeNotifier {
   int volume = 65;
   double progress = 0;
   bool get connected => deviceId != null;
+  int get negotiatedMtu => _mtu;
 
   Future<void> scan() async {
     await stopScan();
@@ -110,7 +126,10 @@ class CubeBle extends ChangeNotifier {
     characteristicId: cubeCharacteristic(n),
     deviceId: deviceId!,
   );
-  Future<void> connect(DiscoveredDevice device) async {
+  Future<void> connect(
+    DiscoveredDevice device, {
+    bool allowGattCacheRefresh = true,
+  }) async {
     await stopScan();
     await disconnect();
     connecting = true;
@@ -181,8 +200,27 @@ class CubeBle extends ChangeNotifier {
         );
     try {
       await complete.future.timeout(const Duration(seconds: 20));
+      if (Platform.isAndroid && allowGattCacheRefresh) {
+        final dataReadable = await _isDataCharacteristicReadable(device.id);
+        if (!dataReadable) {
+          message = 'Actualizando servicios Bluetooth de Android…';
+          notifyListeners();
+          try {
+            await _ble.clearGattCache(device.id);
+          } catch (e) {
+            if (kDebugMode) debugPrint('GATT cache refresh failed: $e');
+            throw StateError(
+              'Android conserva una versión anterior del servicio Bluetooth. Desvincula Cubo-ESP desde Ajustes de Bluetooth, apaga y enciende Bluetooth y vuelve a conectar.',
+            );
+          }
+          await disconnect();
+          await Future<void>.delayed(const Duration(milliseconds: 700));
+          await connect(device, allowGattCacheRefresh: false);
+          return;
+        }
+      }
       try {
-        _mtu = await _ble.requestMtu(deviceId: device.id, mtu: 247);
+        _mtu = await _ble.requestMtu(deviceId: device.id, mtu: _requestedMtu);
       } catch (_) {
         _mtu = 23;
       }
@@ -219,7 +257,7 @@ class CubeBle extends ChangeNotifier {
         }
       }
       if (status.length != 16 ||
-          status[0] != 4 ||
+          status[0] != 5 ||
           status[15] != emotionIds.length) {
         throw StateError('Firmware incompatible con esta app.');
       }
@@ -240,6 +278,20 @@ class CubeBle extends ChangeNotifier {
     }
     connecting = false;
     notifyListeners();
+  }
+
+  Future<bool> _isDataCharacteristicReadable(String id) async {
+    await _ble.discoverAllServices(id);
+    final services = await _ble.getDiscoveredServices(id);
+    for (final service in services) {
+      if (service.id != cubeService) continue;
+      for (final characteristic in service.characteristics) {
+        if (characteristic.id == cubeCharacteristic(2)) {
+          return characteristic.isReadable;
+        }
+      }
+    }
+    return false;
   }
 
   Future<void> disconnect() async {
@@ -315,7 +367,11 @@ class CubeBle extends ChangeNotifier {
   }) async {
     final checksum = crc32(bytes);
     await _command(beginOp, index: index, length: bytes.length, crc: checksum);
-    final chunk = max(1, min(_mtu - 3, 244) - 4);
+    // ATT Write Request dispone de MTU-3 bytes. El valor de un atributo GATT
+    // no puede superar 512 bytes y los primeros cuatro guardan el offset.
+    // El MTU negociado puede ser 517, 247, 185 o incluso el minimo 23.
+    final attributeBytes = min(_mtu - 3, _maximumAttributeValue);
+    final chunk = max(1, attributeBytes - _resourceOffsetBytes);
     for (var offset = 0; offset < bytes.length;) {
       if (_cancel) {
         throw StateError('Envío cancelado; el recurso anterior se conserva.');
@@ -378,7 +434,9 @@ class CubeBle extends ChangeNotifier {
       }
       progress = 0;
       if (png == null) {
-        await _command(6, index: index);
+        // Un teléfono nuevo no debe borrar una personalización remota.
+        // SHOW utiliza la imagen activa del cubo (usuario o predeterminada).
+        await _command(1, index: index);
       } else {
         final bytes = await compute(pngToTft, png);
         final checksum = crc32(bytes);
@@ -439,6 +497,135 @@ class CubeBle extends ChangeNotifier {
       busy = false;
       notifyListeners();
     }
+  }
+
+  Future<CubeSyncResult> syncImages(Map<int, Uint8List> localImages) async {
+    if (busy || !connected || !sdReady) {
+      throw StateError('Conecta un cubo con microSD antes de sincronizar.');
+    }
+    busy = true;
+    _cancel = false;
+    progress = 0;
+    message = 'Consultando recursos del cubo…';
+    notifyListeners();
+    try {
+      final catalog = await _command(15);
+      final catalogData = ByteData.sublistView(catalog);
+      final imageMask = catalogData.getUint16(10, Endian.little);
+      final audioMask = catalogData.getUint16(12, Endian.little);
+      final downloaded = <int, Uint8List>{};
+      var receivedCount = 0;
+      for (var index = 0; index < emotionIds.length; index++) {
+        if (_cancel) throw StateError('Sincronización cancelada.');
+        if ((imageMask & (1 << index)) != 0) {
+          final local = localImages[index];
+          Uint8List? localTft;
+          if (local != null) localTft = await compute(pngToTft, local);
+          final prepared = await _command(
+            14,
+            index: index,
+            length: localTft?.length ?? 0,
+            crc: localTft == null ? 0 : crc32(localTft),
+          );
+          final size = ByteData.sublistView(
+            prepared,
+          ).getUint32(10, Endian.little);
+          if (size != 0) {
+            if (size != 115208) {
+              throw const FormatException(
+                'El cubo informó una imagen con tamaño inválido.',
+              );
+            }
+            final tft = await _downloadPreparedImage(size, index);
+            downloaded[index] = await compute(tftToPng, tft);
+            receivedCount++;
+          }
+        }
+        progress = (index + 1) / emotionIds.length;
+        message = 'Sincronizando imágenes · ${index + 1}/${emotionIds.length}';
+        notifyListeners();
+      }
+      message = '$receivedCount imágenes descargadas del cubo';
+      return CubeSyncResult(
+        imageMask: imageMask,
+        audioMask: audioMask,
+        images: downloaded,
+      );
+    } catch (_) {
+      if (connected) {
+        try {
+          await _command(5);
+        } catch (_) {}
+      }
+      message = 'No se completó la sincronización';
+      rethrow;
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<Uint8List> _downloadPreparedImage(int size, int emotion) async {
+    final output = BytesBuilder(copy: false);
+    var offset = 0;
+    while (offset < size) {
+      if (_cancel) throw StateError('Sincronización cancelada.');
+      if (!connected) throw StateError('Se desconectó el cubo.');
+      Uint8List? packet;
+      Object? lastError;
+      for (var attempt = 0; attempt < 3 && packet == null; attempt++) {
+        try {
+          if (attempt > 0) await _setDownloadOffset(offset);
+          final candidate = Uint8List.fromList(
+            await _ble
+                .readCharacteristic(_char(2))
+                .timeout(const Duration(seconds: 8)),
+          );
+          if (candidate.length < 5) {
+            throw const FormatException('Bloque de imagen vacío.');
+          }
+          final packetOffset = ByteData.sublistView(
+            candidate,
+          ).getUint32(0, Endian.little);
+          if (packetOffset != offset ||
+              offset + candidate.length - 4 > size) {
+            throw const FormatException('Bloque de imagen fuera de secuencia.');
+          }
+          packet = candidate;
+        } catch (e) {
+          lastError = e;
+          if (!connected) rethrow;
+          if (attempt < 2) {
+            await Future<void>.delayed(const Duration(milliseconds: 180));
+          }
+        }
+      }
+      if (packet == null) {
+        if (kDebugMode) {
+          debugPrint('BLE image download failed at $offset: $lastError');
+        }
+        final detail = lastError == null
+            ? ''
+            : ' Detalle BLE: ${lastError.runtimeType}.';
+        throw StateError(
+          'La descarga se interrumpió en $offset de $size bytes.$detail Acerca el teléfono al cubo y vuelve a sincronizar.',
+        );
+      }
+      output.add(packet.sublist(4));
+      offset += packet.length - 4;
+      message =
+          'Descargando ${emotionLabels[emotion].toLowerCase()} · ${(offset * 100 / size).round()} %';
+      notifyListeners();
+    }
+    return output.takeBytes();
+  }
+
+  Future<void> _setDownloadOffset(int offset) async {
+    final request = Uint8List(4);
+    ByteData.sublistView(request).setUint32(0, offset, Endian.little);
+    await _ble
+        .writeCharacteristicWithResponse(_char(2), value: request)
+        .timeout(const Duration(seconds: 8));
   }
 
   Future<void> restore() async {

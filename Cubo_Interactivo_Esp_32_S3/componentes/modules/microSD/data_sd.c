@@ -392,6 +392,23 @@ bool data_sd_file_exists(const char *relative)
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
+esp_err_t data_sd_file_size(const char *relative, size_t *size)
+{
+    if (!size) return ESP_ERR_INVALID_ARG;
+    *size = 0;
+    if (!s_card) return ESP_ERR_INVALID_STATE;
+    char path[SD_PATH_SIZE];
+    esp_err_t err = make_path(relative, path);
+    if (err != ESP_OK) return err;
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return errno == ENOENT ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size <= 0) return ESP_ERR_INVALID_SIZE;
+    *size = (size_t)st.st_size;
+    return ESP_OK;
+}
+
 esp_err_t data_sd_delete_file(const char *relative)
 {
     if (!s_card) return ESP_ERR_INVALID_STATE;

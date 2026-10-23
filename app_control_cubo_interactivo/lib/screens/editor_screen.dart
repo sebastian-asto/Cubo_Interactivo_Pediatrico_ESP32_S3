@@ -140,6 +140,7 @@ class _EditorScreenState extends State<EditorScreen> {
       final wav = await compute(canonicalizeWav, {
         'bytes': audioSource!,
         'start': audioStart,
+        'duration': widget.store.audioDurationSeconds,
       });
       await player.play(BytesSource(wav));
       if (mounted) setState(() => playing = true);
@@ -163,6 +164,7 @@ class _EditorScreenState extends State<EditorScreen> {
         final wav = await compute(canonicalizeWav, {
           'bytes': audioSource!,
           'start': audioStart,
+          'duration': widget.store.audioDurationSeconds,
         });
         await widget.store.saveAudio(widget.index, wav);
       } else if (removeAudio) {
@@ -179,9 +181,12 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   Widget build(BuildContext context) {
     final current = preview ?? widget.store.custom[widget.index];
-    final hasStoredAudio = widget.store.audio.containsKey(widget.index);
-    final maxStart = ((audioInfo?.durationSeconds ?? 0) - maxAudioSeconds)
-        .clamp(0.0, double.infinity);
+    final hasStoredAudio = widget.store.hasAudio(widget.index);
+    final clipSeconds = widget.store.audioDurationSeconds;
+    final maxStart = ((audioInfo?.durationSeconds ?? 0) - clipSeconds).clamp(
+      0.0,
+      double.infinity,
+    );
     final changed = preview != null || audioSource != null || removeAudio;
     return Scaffold(
       appBar: AppBar(title: const Text('Imagen y sonido')),
@@ -290,7 +295,7 @@ class _EditorScreenState extends State<EditorScreen> {
                     waveform!,
                     startFraction: audioStart / audioInfo!.durationSeconds,
                     endFraction:
-                        (audioStart + maxAudioSeconds).clamp(
+                        (audioStart + clipSeconds).clamp(
                           0,
                           audioInfo!.durationSeconds,
                         ) /
@@ -300,7 +305,7 @@ class _EditorScreenState extends State<EditorScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Inicio: ${audioStart.toStringAsFixed(1)} s · fragmento de hasta 15 s',
+                'Inicio: ${audioStart.toStringAsFixed(1)} s · fragmento de hasta ${_audioDurationLabel(clipSeconds)}',
               ),
               Slider(
                 value: audioStart.clamp(0, maxStart),
@@ -324,7 +329,9 @@ class _EditorScreenState extends State<EditorScreen> {
                       : Icons.play_circle_outline,
                 ),
                 label: Text(
-                  playing ? 'Detener vista previa' : 'Escuchar los 15 segundos',
+                  playing
+                      ? 'Detener vista previa'
+                      : 'Escuchar ${_audioDurationLabel(clipSeconds)}',
                 ),
               ),
               const Text(
@@ -374,6 +381,12 @@ class _EditorScreenState extends State<EditorScreen> {
       ),
     );
   }
+}
+
+String _audioDurationLabel(int seconds) {
+  if (seconds < 60) return '$seconds segundos';
+  final minutes = seconds ~/ 60;
+  return '$minutes ${minutes == 1 ? 'minuto' : 'minutos'}';
 }
 
 class _WaveformPainter extends CustomPainter {

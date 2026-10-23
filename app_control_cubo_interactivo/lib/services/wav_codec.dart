@@ -2,7 +2,9 @@ import 'dart:math';
 import 'dart:typed_data';
 
 const canonicalSampleRate = 16000;
-const maxAudioSeconds = 15;
+const defaultAudioSeconds = 30;
+const maximumAudioSeconds = 180;
+const audioDurationOptions = [15, 30, 60, 120, 180];
 
 class WavInfo {
   const WavInfo({
@@ -105,6 +107,13 @@ List<double> buildWaveform(Uint8List bytes, {int bins = 80}) {
 Uint8List canonicalizeWav(Map<String, Object> request) {
   final input = request['bytes']! as Uint8List;
   final startSeconds = (request['start']! as num).toDouble();
+  final durationSeconds =
+      (request['duration'] as num?)?.toInt() ?? defaultAudioSeconds;
+  if (!audioDurationOptions.contains(durationSeconds)) {
+    throw const FormatException(
+      'La duración de audio seleccionada no es válida.',
+    );
+  }
   final parsed = _parse(input);
   final info = parsed.info;
   final sourceStart = min(
@@ -112,7 +121,7 @@ Uint8List canonicalizeWav(Map<String, Object> request) {
     max(0, (startSeconds * info.sampleRate).round()),
   );
   final outputFrames = min(
-    canonicalSampleRate * maxAudioSeconds,
+    canonicalSampleRate * durationSeconds,
     ((info.frames - sourceStart) * canonicalSampleRate / info.sampleRate)
         .ceil(),
   );

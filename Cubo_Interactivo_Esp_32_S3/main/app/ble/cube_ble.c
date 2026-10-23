@@ -12,6 +12,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/ble_att.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "audio_player.h"
@@ -34,11 +35,15 @@ static uint32_t connection_generation;
 static bool ready, audio_ready;
 /* status: version, result(0 OK/1 BUSY/2 ERROR), seqLE16, op, selected,
  * errLE32, receivedLE32, flags(bit0 SD, bit1 cifrado, bit2 audio), count. */
-static uint8_t status[16] = {4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16};
+static uint8_t status[16] = {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16};
 static uint8_t *upload;
 static uint32_t received, expected_crc, expected_size;
 static uint8_t upload_index, upload_op;
-static TickType_t last_chunk;
+static uint8_t *download;
+static uint32_t download_size, download_offset;
+static uint16_t download_owner = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t image_mask, audio_mask;
+static TickType_t last_chunk, download_last_chunk;
 static const size_t image_size = 115208;
 
 typedef struct
@@ -110,9 +115,21 @@ static void discard(void)
     upload_op = 0;
 }
 
-static esp_err_t show_and_play(uint8_t index, bool check_crc, uint32_t crc)
+static void discard_download(void)
 {
-    esp_err_t err = check_crc ? emotions_show_if_crc(index, crc) : emotions_show(index);
+    free(download);
+    download = NULL;
+    download_size = 0;
+    download_offset = 0;
+    download_owner = BLE_HS_CONN_HANDLE_NONE;
+}
+
+static esp_err_t show_and_play(uint8_t index, bool check_crc,
+                               uint32_t size, uint32_t crc)
+{
+    esp_err_t err = check_crc
+        ? emotions_show_if_crc(index, size, crc)
+        : emotions_show(index);
     if (err != ESP_OK) return err;
     err = emotions_play_audio(index);
     return err == ESP_ERR_NOT_FOUND ? ESP_OK : err;
@@ -128,6 +145,9 @@ static void worker(void *arg)
             xSemaphoreTake(lock, portMAX_DELAY);
             if (upload && xTaskGetTickCount() - last_chunk > pdMS_TO_TICKS(60000))
                 discard();
+            if (download &&
+                xTaskGetTickCount() - download_last_chunk > pdMS_TO_TICKS(60000))
+                discard_download();
             xSemaphoreGive(lock);
             continue;
         }
@@ -144,6 +164,8 @@ static void worker(void *arg)
         else if (op == 2 || op == 8)
         {
             discard();
+            /* Cerrar el WAV activo antes de sustituir un archivo de audio. */
+            if (op == 8) audio_player_stop();
             uint32_t requested = le32(cmd.bytes + 4);
             bool valid_size = op == 2 ? requested == image_size :
                 requested >= 45 && requested <= AUDIO_WAV_MAX_BYTES;
@@ -180,7 +202,10 @@ static void worker(void *arg)
             discard();
         }
         else if (op == 5)
+        {
             discard();
+            discard_download();
+        }
         else if (upload)
             err = ESP_ERR_INVALID_STATE;
         xSemaphoreGive(lock);
@@ -189,32 +214,34 @@ static void worker(void *arg)
         if (err == ESP_OK)
         {
             if (op == 1)
-                err = show_and_play(idx, false, 0);
+                err = show_and_play(idx, false, 0, 0);
             else if (op == 3)
             {
                 err = emotions_replace(idx, resource, resource_size);
-                if (err == ESP_OK) err = show_and_play(idx, false, 0);
+                if (err == ESP_OK) err = show_and_play(idx, false, 0, 0);
             }
             else if (op == 4)
             {
                 for (size_t i = 0; i < emotions_count() && err == ESP_OK; i++)
                     err = emotions_restore(i);
                 idx = 0;
-                if (err == ESP_OK) err = show_and_play(idx, false, 0);
+                if (err == ESP_OK) err = show_and_play(idx, false, 0, 0);
             }
             else if (op == 6)
             {
                 err = emotions_restore(idx);
-                if (err == ESP_OK) err = show_and_play(idx, false, 0);
+                if (err == ESP_OK) err = show_and_play(idx, false, 0, 0);
             }
             else if (op == 7)
-                err = show_and_play(idx, true, le32(cmd.bytes + 8));
+                err = show_and_play(idx, true, le32(cmd.bytes + 4),
+                                    le32(cmd.bytes + 8));
             else if (op == 9)
                 err = emotions_audio_replace(idx, resource, resource_size);
             else if (op == 10)
                 err = emotions_audio_restore(idx);
             else if (op == 11)
-                err = emotions_audio_matches(idx, le32(cmd.bytes + 8));
+                err = emotions_audio_matches(idx, le32(cmd.bytes + 4),
+                                             le32(cmd.bytes + 8));
             else if (op == 12)
             {
                 uint32_t requested = le32(cmd.bytes + 4);
@@ -232,6 +259,36 @@ static void worker(void *arg)
                     err = ESP_ERR_INVALID_STATE;
                 else
                     idx = audio_player_get_volume();
+            }
+            else if (op == 14)
+            {
+                size_t exported_size = 0;
+                err = emotions_export_image(idx, le32(cmd.bytes + 4),
+                                            le32(cmd.bytes + 8),
+                                            &resource, &exported_size);
+                if (err == ESP_OK && exported_size > UINT32_MAX)
+                    err = ESP_ERR_INVALID_SIZE;
+                if (err == ESP_OK) resource_size = (uint32_t)exported_size;
+                if (err == ESP_OK) {
+                    xSemaphoreTake(lock, portMAX_DELAY);
+                    discard_download();
+                    download = resource;
+                    download_size = resource_size;
+                    download_offset = 0;
+                    download_owner = cmd.owner;
+                    download_last_chunk = xTaskGetTickCount();
+                    resource = NULL;
+                    xSemaphoreGive(lock);
+                }
+            }
+            else if (op == 15)
+            {
+                uint16_t images = 0, audio = 0;
+                emotions_resource_masks(&images, &audio);
+                xSemaphoreTake(lock, portMAX_DELAY);
+                image_mask = images;
+                audio_mask = audio;
+                xSemaphoreGive(lock);
             }
         }
         free(resource);
@@ -255,9 +312,49 @@ static int access_cb(uint16_t conn, uint16_t attr,
     xSemaphoreTake(lock, portMAX_DELAY);
     if (kind == 3)
     {
-        put32(status + 10, received);
+        if (status[1] == 0 && status[4] == 14)
+            put32(status + 10, download_size);
+        else if (status[1] == 0 && status[4] == 15)
+        {
+            status[10] = (uint8_t)image_mask;
+            status[11] = (uint8_t)(image_mask >> 8);
+            status[12] = (uint8_t)audio_mask;
+            status[13] = (uint8_t)(audio_mask >> 8);
+        }
+        else
+            put32(status + 10, received);
         rc = os_mbuf_append(ctx->om, status, sizeof status) == 0
             ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    else if (kind == 2 && ctx->op == BLE_GATT_ACCESS_OP_READ_CHR)
+    {
+        if (!download || download_owner != conn || download_offset >= download_size)
+            rc = BLE_ATT_ERR_UNLIKELY;
+        else
+        {
+            uint16_t mtu = ble_att_mtu(conn);
+            /* Mantener la respuesta por debajo de MTU-1 evita que el cliente
+             * la interprete como una lectura GATT larga automatica. */
+            size_t capacity = mtu > 6 ? (size_t)mtu - 6 : 1;
+            /* 240 bytes de datos + 4 de offset caben en un ACL de 255 bytes.
+             * Evita fragmentar respuestas largas de MTU 517 en el controlador. */
+            if (capacity > 240) capacity = 240;
+            size_t count = download_size - download_offset;
+            if (count > capacity) count = capacity;
+            uint8_t offset_bytes[4];
+            put32(offset_bytes, download_offset);
+            if (os_mbuf_append(ctx->om, offset_bytes, sizeof(offset_bytes)) != 0 ||
+                os_mbuf_append(ctx->om, download + download_offset, count) != 0)
+                rc = BLE_ATT_ERR_INSUFFICIENT_RES;
+            else
+            {
+                download_offset += count;
+                /* Conservar el buffer hasta el siguiente comando o timeout.
+                 * Si Android pierde la respuesta final, puede pedir el offset
+                 * anterior y repetirla sin reiniciar toda la descarga. */
+                download_last_chunk = xTaskGetTickCount();
+            }
+        }
     }
     else
     {
@@ -268,8 +365,19 @@ static int access_cb(uint16_t conn, uint16_t attr,
             rc = BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         else if (kind == 2)
         {
-            if (status[1] == 1 || !upload || len < 5 ||
-                le32(packet) != received || len - 4 > expected_size - received)
+            if (download && download_owner == conn && len == 4)
+            {
+                uint32_t requested = le32(packet);
+                if (requested >= download_size)
+                    rc = BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+                else
+                {
+                    download_offset = requested;
+                    download_last_chunk = xTaskGetTickCount();
+                }
+            }
+            else if (status[1] == 1 || !upload || len < 5 ||
+                     le32(packet) != received || len - 4 > expected_size - received)
                 rc = BLE_ATT_ERR_UNLIKELY;
             else
             {
@@ -278,7 +386,7 @@ static int access_cb(uint16_t conn, uint16_t attr,
                 last_chunk = xTaskGetTickCount();
             }
         }
-        else if (len != 12 || packet[0] < 1 || packet[0] > 13 ||
+        else if (len != 12 || packet[0] < 1 || packet[0] > 15 ||
                  packet[3] >= emotions_count())
             rc = BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         else if (status[1] == 1)
@@ -314,7 +422,8 @@ static const struct ble_gatt_svc_def services[] = {
                                      {.uuid = &data_uuid.u,
                                       .access_cb = access_cb,
                                       .arg = (void *)2,
-                                      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC},
+                                      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                                               BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC},
                                      {.uuid = &status_uuid.u,
                                       .access_cb = access_cb,
                                       .arg = (void *)3,
@@ -347,6 +456,7 @@ static int gap_event(struct ble_gap_event *ev, void *arg)
         status[14] = flags(false);
         ++connection_generation;
         discard();
+        discard_download();
         xSemaphoreGive(lock);
         advertise();
     }

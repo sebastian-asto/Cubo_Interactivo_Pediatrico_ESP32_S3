@@ -17,11 +17,13 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final ble = CubeBle();
     final store = ArtworkStore();
+    store.remoteAudio.add(0);
     await tester.pumpWidget(CubeApp(store: store, ble: ble));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Emociones'));
     await tester.pumpAndSettle();
     expect(find.text('Estoy feliz'), findsOneWidget);
+    expect(find.byIcon(Icons.music_note), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('emotion-1')));
     await tester.pumpAndSettle();
     expect(find.text('Estoy triste'), findsOneWidget);

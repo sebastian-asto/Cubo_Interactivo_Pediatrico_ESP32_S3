@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../main.dart';
+import '../models/emotion.dart';
 import '../services/artwork_store.dart';
 import '../services/cube_ble.dart';
+import '../services/wav_codec.dart';
 import 'emotions_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -67,6 +69,51 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _syncImages() async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('¿Traer imágenes del cubo?'),
+        content: const Text(
+          'La microSD será la fuente principal. Las imágenes locales diferentes se reemplazarán por las guardadas en el cubo.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Sincronizar'),
+          ),
+        ],
+      ),
+    );
+    if (yes != true) return;
+    try {
+      final result = await widget.ble.syncImages(Map.of(widget.store.custom));
+      for (var i = 0; i < emotionIds.length; i++) {
+        if ((result.imageMask & (1 << i)) == 0 &&
+            widget.store.custom.containsKey(i)) {
+          await widget.store.removeLocalImage(i);
+        }
+      }
+      for (final entry in result.images.entries) {
+        await widget.store.save(entry.key, entry.value);
+      }
+      await widget.store.setRemoteAudioMask(result.audioMask);
+      final customCount = _bitCount(result.imageMask);
+      final audioCount = _bitCount(result.audioMask);
+      if (mounted) {
+        _notice(
+          '$customCount imágenes personalizadas · $audioCount emociones con sonido.',
+        );
+      }
+    } catch (e) {
+      if (mounted) _notice(userError(e));
+    }
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: Listenable.merge([widget.store, widget.ble]),
@@ -83,6 +130,8 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           _DeviceSettings(
             ble: widget.ble,
+            store: widget.store,
+            onSync: _syncImages,
             onRestore: _restoreImages,
             onRemoveAudio: _removeAudio,
           ),
@@ -148,7 +197,7 @@ class _DeviceScan extends StatelessWidget {
                 subtitle: Text(
                   ble.connected
                       ? (ble.sdReady
-                            ? 'microSD lista${ble.audioReady ? ' · audio listo' : ' · audio no disponible'}'
+                            ? 'microSD lista${ble.audioReady ? ' · audio listo' : ' · audio no disponible'} · MTU ${ble.negotiatedMtu}'
                             : 'Revisa la microSD')
                       : 'Enciende el cubo y mantenlo cerca.',
                 ),
@@ -235,11 +284,14 @@ class _DeviceScan extends StatelessWidget {
 class _DeviceSettings extends StatefulWidget {
   const _DeviceSettings({
     required this.ble,
+    required this.store,
+    required this.onSync,
     required this.onRestore,
     required this.onRemoveAudio,
   });
   final CubeBle ble;
-  final VoidCallback onRestore, onRemoveAudio;
+  final ArtworkStore store;
+  final VoidCallback onSync, onRestore, onRemoveAudio;
   @override
   State<_DeviceSettings> createState() => _DeviceSettingsState();
 }
@@ -341,6 +393,73 @@ class _DeviceSettingsState extends State<_DeviceSettings> {
                 ),
               ),
               Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.timer_outlined, color: orange),
+                          SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              'Duración máxima del audio',
+                              style: TextStyle(
+                                fontSize: 17,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<int>(
+                        initialValue: widget.store.audioDurationSeconds,
+                        decoration: const InputDecoration(
+                          border: OutlineInputBorder(),
+                          labelText: 'Duración de cada fragmento',
+                        ),
+                        items: audioDurationOptions
+                            .map(
+                              (seconds) => DropdownMenuItem(
+                                value: seconds,
+                                child: Text(_audioDurationLabel(seconds)),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (seconds) async {
+                          if (seconds != null) {
+                            await widget.store.saveAudioDuration(seconds);
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        'Se aplica al recortar nuevos audios. Los sonidos ya guardados no se modifican.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: paper.withValues(alpha: .7),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.sync_rounded, color: sage),
+                  title: const Text('Sincronizar imágenes desde el cubo'),
+                  subtitle: const Text(
+                    'Trae las caras modificadas y detecta qué emociones tienen sonido.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: !ble.connected || !ble.sdReady || ble.busy
+                      ? null
+                      : widget.onSync,
+                ),
+              ),
+              Card(
                 child: ListTile(
                   leading: const Icon(Icons.restart_alt, color: orange),
                   title: const Text('Restablecer imágenes'),
@@ -379,4 +498,19 @@ class _DeviceSettingsState extends State<_DeviceSettings> {
       ),
     );
   }
+}
+
+String _audioDurationLabel(int seconds) {
+  if (seconds < 60) return '$seconds segundos';
+  final minutes = seconds ~/ 60;
+  return '$minutes ${minutes == 1 ? 'minuto' : 'minutos'}';
+}
+
+int _bitCount(int value) {
+  var count = 0;
+  while (value != 0) {
+    count += value & 1;
+    value >>= 1;
+  }
+  return count;
 }

@@ -231,6 +231,7 @@ class _EmotionsScreenState extends State<EmotionsScreen> {
                             itemBuilder: (context, i) {
                               final active = selected == i,
                                   custom = widget.store.custom[i];
+                              final hasAudio = widget.store.hasAudio(i);
                               return Semantics(
                                 selected: active,
                                 label:
@@ -309,14 +310,46 @@ class _EmotionsScreenState extends State<EmotionsScreen> {
                                                   ),
                                                 ),
                                               ),
-                                              if (custom != null)
-                                                const Positioned(
+                                              if (custom != null || hasAudio)
+                                                Positioned(
                                                   bottom: 4,
                                                   left: 4,
-                                                  child: Icon(
-                                                    Icons.photo,
-                                                    size: 14,
-                                                    color: Colors.white,
+                                                  child: Container(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 4,
+                                                          vertical: 3,
+                                                        ),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.black54,
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            7,
+                                                          ),
+                                                    ),
+                                                    child: Row(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      children: [
+                                                        if (custom != null)
+                                                          const Icon(
+                                                            Icons.photo,
+                                                            size: 14,
+                                                            color: Colors.white,
+                                                          ),
+                                                        if (custom != null &&
+                                                            hasAudio)
+                                                          const SizedBox(
+                                                            width: 3,
+                                                          ),
+                                                        if (hasAudio)
+                                                          const Icon(
+                                                            Icons.music_note,
+                                                            size: 14,
+                                                            color: orange,
+                                                          ),
+                                                      ],
+                                                    ),
                                                   ),
                                                 ),
                                             ],

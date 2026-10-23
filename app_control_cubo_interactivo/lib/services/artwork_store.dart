@@ -5,17 +5,35 @@ import 'package:path_provider/path_provider.dart';
 import '../models/emotion.dart';
 import 'package:image_picker/image_picker.dart';
 import 'tft_codec.dart';
+import 'wav_codec.dart';
 
 class ArtworkStore extends ChangeNotifier {
   final Map<int, Uint8List> custom = {};
   final Map<int, Uint8List> audio = {};
   final Set<int> audioRemoved = {};
+  final Set<int> remoteAudio = {};
+  int audioDurationSeconds = defaultAudioSeconds;
   Directory? _directory;
   Future<void> load() async {
     final root = await getApplicationSupportDirectory();
     _directory = await Directory(
       '${root.path}/emotions',
     ).create(recursive: true);
+    final durationFile = _audioDurationFile();
+    if (await durationFile.exists()) {
+      final saved = int.tryParse(await durationFile.readAsString());
+      if (saved != null && audioDurationOptions.contains(saved)) {
+        audioDurationSeconds = saved;
+      }
+    }
+    final remoteAudioFile = _remoteAudioMaskFile();
+    if (await remoteAudioFile.exists()) {
+      final mask = int.tryParse(await remoteAudioFile.readAsString()) ?? 0;
+      remoteAudio.addAll([
+        for (var i = 0; i < emotionIds.length; i++)
+          if ((mask & (1 << i)) != 0) i,
+      ]);
+    }
     for (var i = 0; i < emotionIds.length; i++) {
       final file = _file(i);
       if (await file.exists()) custom[i] = await file.readAsBytes();
@@ -65,6 +83,19 @@ class ArtworkStore extends ChangeNotifier {
   File _audioFile(int i) => File('${_directory!.path}/${emotionIds[i]}.wav');
   File _audioMarker(int i) =>
       File('${_directory!.path}/${emotionIds[i]}.noaudio');
+  File _audioDurationFile() => File('${_directory!.path}/audio_duration.txt');
+  File _remoteAudioMaskFile() =>
+      File('${_directory!.path}/remote_audio_mask.txt');
+
+  Future<void> saveAudioDuration(int seconds) async {
+    if (!audioDurationOptions.contains(seconds)) {
+      throw ArgumentError.value(seconds, 'seconds');
+    }
+    await _audioDurationFile().writeAsString('$seconds', flush: true);
+    audioDurationSeconds = seconds;
+    notifyListeners();
+  }
+
   Future<void> save(int i, Uint8List png) async {
     final temp = File('${_file(i).path}.tmp');
     await temp.writeAsBytes(png, flush: true);
@@ -72,6 +103,36 @@ class ArtworkStore extends ChangeNotifier {
     custom[i] = png;
     notifyListeners();
   }
+
+  Future<void> removeLocalImage(int i) async {
+    final file = _file(i);
+    if (await file.exists()) await file.delete();
+    custom.remove(i);
+    notifyListeners();
+  }
+
+  Future<void> setRemoteAudioMask(int mask) async {
+    remoteAudio
+      ..clear()
+      ..addAll([
+        for (var i = 0; i < emotionIds.length; i++)
+          if ((mask & (1 << i)) != 0) i,
+      ]);
+    await _persistRemoteAudio();
+    notifyListeners();
+  }
+
+  Future<void> _persistRemoteAudio() async {
+    var mask = 0;
+    for (final index in remoteAudio) {
+      mask |= 1 << index;
+    }
+    await _remoteAudioMaskFile().writeAsString('$mask', flush: true);
+  }
+
+  bool hasAudio(int i) =>
+      !audioRemoved.contains(i) &&
+      (audio.containsKey(i) || remoteAudio.contains(i));
 
   Future<void> saveAudio(int i, Uint8List wav) async {
     final destination = _audioFile(i);
@@ -99,6 +160,8 @@ class ArtworkStore extends ChangeNotifier {
     final marker = _audioMarker(i);
     if (await marker.exists()) await marker.delete();
     audioRemoved.remove(i);
+    remoteAudio.remove(i);
+    await _persistRemoteAudio();
     notifyListeners();
   }
 
@@ -120,6 +183,8 @@ class ArtworkStore extends ChangeNotifier {
     }
     audio.clear();
     audioRemoved.clear();
+    remoteAudio.clear();
+    await _persistRemoteAudio();
     notifyListeners();
   }
 

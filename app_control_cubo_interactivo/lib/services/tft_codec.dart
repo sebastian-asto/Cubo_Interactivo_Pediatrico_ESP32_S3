@@ -90,3 +90,37 @@ Uint8List pngToTft(Uint8List bytes) {
   }
   return encodeTft(image);
 }
+
+Uint8List tftToPng(Uint8List bytes) {
+  if (bytes.length != 115208 ||
+      bytes[0] != 84 ||
+      bytes[1] != 70 ||
+      bytes[2] != 84 ||
+      bytes[3] != 49 ||
+      bytes[4] != 0 ||
+      bytes[5] != 240 ||
+      bytes[6] != 0 ||
+      bytes[7] != 240) {
+    throw const FormatException('La imagen recibida del cubo no es TFT1.');
+  }
+  final data = ByteData.sublistView(bytes);
+  final image = img.Image(width: 240, height: 240);
+  var offset = 8;
+  for (var y = 0; y < 240; y++) {
+    for (var x = 0; x < 240; x++) {
+      final value = data.getUint16(offset, Endian.big);
+      final r = (value >> 11) & 0x1f;
+      final g = (value >> 5) & 0x3f;
+      final b = value & 0x1f;
+      image.setPixelRgb(
+        x,
+        y,
+        (r << 3) | (r >> 2),
+        (g << 2) | (g >> 4),
+        (b << 3) | (b >> 2),
+      );
+      offset += 2;
+    }
+  }
+  return Uint8List.fromList(img.encodePng(image));
+}

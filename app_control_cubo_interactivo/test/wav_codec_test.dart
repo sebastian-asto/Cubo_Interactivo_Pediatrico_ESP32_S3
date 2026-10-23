@@ -33,7 +33,11 @@ void main() {
     final info = inspectWav(input);
     expect(info.durationSeconds, 2);
     expect(info.channels, 2);
-    final output = canonicalizeWav({'bytes': input, 'start': 0.5});
+    final output = canonicalizeWav({
+      'bytes': input,
+      'start': 0.5,
+      'duration': 15,
+    });
     final canonical = inspectWav(output);
     expect(canonical.sampleRate, canonicalSampleRate);
     expect(canonical.channels, 1);
@@ -42,6 +46,16 @@ void main() {
     final waveform = buildWaveform(input);
     expect(waveform, hasLength(80));
     expect(waveform.every((value) => value >= .04 && value <= 1), isTrue);
+  });
+
+  test('respeta una duración configurable de hasta tres minutos', () {
+    final input = wav16Stereo(rate: 8000, frames: 8000 * 181);
+    final output = canonicalizeWav({
+      'bytes': input,
+      'start': 0,
+      'duration': 180,
+    });
+    expect(inspectWav(output).durationSeconds, 180);
   });
 
   test('rechaza un archivo que no es WAV', () {

@@ -17,6 +17,8 @@ esp_err_t data_sd_replace(const char *relative_path, const uint8_t *data, size_t
 /* Elimina un archivo de usuario y sus temporales transaccionales. Ausente = OK. */
 esp_err_t data_sd_delete_file(const char *relative_path);
 bool data_sd_file_exists(const char *relative_path);
+/* Consulta el tamano sin cargar el archivo completo. */
+esp_err_t data_sd_file_size(const char *relative_path, size_t *size);
 
 /* Instala solo archivos ausentes; usa un temporal exclusivo y fsync. */
 esp_err_t data_sd_write_if_absent(const char *relative_path, const uint8_t *data,
