@@ -58,6 +58,18 @@ void main() {
     expect(inspectWav(output).durationSeconds, 180);
   });
 
+  test('la conversión cooperativa produce el mismo WAV sin bloquear', () async {
+    final input = wav16Stereo(rate: 44100, frames: 44100 * 4);
+    final request = <String, Object>{
+      'bytes': input,
+      'start': 1.25,
+      'duration': 30,
+    };
+    final expected = canonicalizeWav(request);
+    final actual = await canonicalizeWavAsync(request, batchFrames: 257);
+    expect(actual, orderedEquals(expected));
+  });
+
   test('rechaza un archivo que no es WAV', () {
     expect(() => inspectWav(Uint8List(44)), throwsFormatException);
   });

@@ -26,6 +26,7 @@ La V1.7.2 incorpora sincronización recuperable de imágenes desde el cubo para 
 - Sincronización manual y de solo lectura de las imágenes personalizadas del cubo.
 - Indicador musical en cada emoción que posee un audio local o remoto.
 - Detección y actualización automática de la caché GATT antigua en Android.
+- Encendido enclavado desde batería y apagado por KEY_PWR/GPIO5 y BAT_EN/GPIO2.
 
 ## Arquitectura
 
@@ -36,6 +37,7 @@ Aplicación Flutter
     ▼
 ESP32-S3
     ├── TFT ST7789 240×240
+    ├── KEY_PWR GPIO5 ── controla ── BAT_EN GPIO2
     ├── microSD
     │   └── Doc_microSD/
     └── ES8311 + NS4150B
@@ -109,7 +111,9 @@ El orden es compartido por la app, el firmware, el manifiesto de microSD y el pr
 │   ├── assets/emotions/
 │   └── release/                    # APK generados
 ├── Cubo_Interactivo_Esp_32_S3/    # Firmware ESP-IDF
-│   ├── componentes/
+│   ├── components/
+│   │   ├── driver/                 # Managers locales I2C, I2S y SPI
+│   │   └── modules/                # TFT, microSD, audio y ES8311
 │   ├── main/
 │   ├── docs/
 │   ├── tests/
@@ -195,7 +199,7 @@ El archivo canónico ocupa como máximo 2.880.044 bytes. Un audio de 3 minutos u
 | CODEC_SCL | 41 |
 | PA_CTRL | 7 |
 
-El volumen se aplica al ES8311 y se guarda en NVS bajo `cube_cfg/volume`, por lo que se recupera después de reiniciar el cubo.
+El volumen se aplica al ES8311 y se guarda en NVS bajo `cube_cfg/volume`, por lo que se recupera después de reiniciar el cubo. El firmware usa drivers propios en `components`: I2C para configurar registros del ES8311, I2S para transmitir PCM y un módulo local del codec; no depende de `managed_components` ni de `esp_codec_dev`.
 
 ## Compilación
 

@@ -26,7 +26,7 @@ class _EditorScreenState extends State<EditorScreen> {
   List<double>? waveform;
   bool cover = true, working = false, removeAudio = false, playing = false;
   double zoom = 1, audioStart = 0;
-  String? audioName, error;
+  String? audioName, error, workingMessage;
   final AudioPlayer player = AudioPlayer();
   StreamSubscription<void>? completeSubscription;
 
@@ -134,10 +134,11 @@ class _EditorScreenState extends State<EditorScreen> {
     if (audioSource == null) return;
     setState(() {
       working = true;
+      workingMessage = 'Preparando vista previa…';
       error = null;
     });
     try {
-      final wav = await compute(canonicalizeWav, {
+      final wav = await canonicalizeWavAsync({
         'bytes': audioSource!,
         'start': audioStart,
         'duration': widget.store.audioDurationSeconds,
@@ -149,23 +150,32 @@ class _EditorScreenState extends State<EditorScreen> {
         setState(() => error = 'No se pudo reproducir el fragmento: $e');
       }
     } finally {
-      if (mounted) setState(() => working = false);
+      if (mounted) {
+        setState(() {
+          working = false;
+          workingMessage = null;
+        });
+      }
     }
   }
 
   Future<void> _save() async {
     setState(() {
       working = true;
+      workingMessage = 'Preparando el audio…';
       error = null;
     });
     try {
       if (preview != null) await widget.store.save(widget.index, preview!);
       if (audioSource != null) {
-        final wav = await compute(canonicalizeWav, {
+        final wav = await canonicalizeWavAsync({
           'bytes': audioSource!,
           'start': audioStart,
           'duration': widget.store.audioDurationSeconds,
         });
+        if (mounted) {
+          setState(() => workingMessage = 'Guardando en el teléfono…');
+        }
         await widget.store.saveAudio(widget.index, wav);
       } else if (removeAudio) {
         await widget.store.removeAudio(widget.index);
@@ -174,7 +184,12 @@ class _EditorScreenState extends State<EditorScreen> {
     } catch (e) {
       if (mounted) setState(() => error = 'No se pudo guardar: $e');
     } finally {
-      if (mounted) setState(() => working = false);
+      if (mounted) {
+        setState(() {
+          working = false;
+          workingMessage = null;
+        });
+      }
     }
   }
 
@@ -354,9 +369,20 @@ class _EditorScreenState extends State<EditorScreen> {
                 label: const Text('Quitar sonido de esta emoción'),
               ),
             if (working)
-              const Padding(
-                padding: EdgeInsets.all(16),
-                child: LinearProgressIndicator(),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    const LinearProgressIndicator(),
+                    if (workingMessage != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        workingMessage!,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ],
+                ),
               ),
             if (error != null)
               Padding(

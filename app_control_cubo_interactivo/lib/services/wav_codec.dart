@@ -104,7 +104,43 @@ List<double> buildWaveform(Uint8List bytes, {int bins = 80}) {
   });
 }
 
-Uint8List canonicalizeWav(Map<String, Object> request) {
+class _CanonicalConversion {
+  _CanonicalConversion({
+    required this.input,
+    required this.parsed,
+    required this.sourceStart,
+    required this.output,
+  });
+
+  final Uint8List input, output;
+  final _ParsedWav parsed;
+  final int sourceStart;
+
+  void writeFrames(int first, int end) {
+    final info = parsed.info;
+    final source = ByteData.sublistView(input);
+    final bytesPerSample = info.bitsPerSample ~/ 8;
+    final frameBytes = info.channels * bytesPerSample;
+    for (var i = first; i < end; i++) {
+      final frame = min(
+        info.frames - 1,
+        sourceStart + (i * info.sampleRate ~/ canonicalSampleRate),
+      );
+      var sum = 0;
+      for (var channel = 0; channel < info.channels; channel++) {
+        final at =
+            parsed.dataOffset + frame * frameBytes + channel * bytesPerSample;
+        sum += info.bitsPerSample == 8
+            ? (input[at] - 128) * 256
+            : source.getInt16(at, Endian.little);
+      }
+      final signed = sum ~/ info.channels;
+      output[44 + i] = (signed ~/ 256 + 128).clamp(0, 255);
+    }
+  }
+}
+
+_CanonicalConversion _prepareCanonical(Map<String, Object> request) {
   final input = request['bytes']! as Uint8List;
   final startSeconds = (request['start']! as num).toDouble();
   final durationSeconds =
@@ -142,24 +178,34 @@ Uint8List canonicalizeWav(Map<String, Object> request) {
   header.setUint16(34, 8, Endian.little);
   tag(36, 'data');
   header.setUint32(40, outputFrames, Endian.little);
-  final source = ByteData.sublistView(input);
-  final bytesPerSample = info.bitsPerSample ~/ 8;
-  final frameBytes = info.channels * bytesPerSample;
-  for (var i = 0; i < outputFrames; i++) {
-    final frame = min(
-      info.frames - 1,
-      sourceStart + (i * info.sampleRate ~/ canonicalSampleRate),
-    );
-    var sum = 0;
-    for (var channel = 0; channel < info.channels; channel++) {
-      final at =
-          parsed.dataOffset + frame * frameBytes + channel * bytesPerSample;
-      sum += info.bitsPerSample == 8
-          ? (input[at] - 128) * 256
-          : source.getInt16(at, Endian.little);
+  return _CanonicalConversion(
+    input: input,
+    parsed: parsed,
+    sourceStart: sourceStart,
+    output: output,
+  );
+}
+
+Uint8List canonicalizeWav(Map<String, Object> request) {
+  final conversion = _prepareCanonical(request);
+  conversion.writeFrames(0, conversion.output.length - 44);
+  return conversion.output;
+}
+
+/// Convierte sin copiar el WAV completo a otro isolate. El trabajo se divide
+/// en lotes para que Android pueda seguir dibujando y atendiendo eventos.
+Future<Uint8List> canonicalizeWavAsync(
+  Map<String, Object> request, {
+  int batchFrames = 32768,
+}) async {
+  if (batchFrames <= 0) throw ArgumentError.value(batchFrames, 'batchFrames');
+  final conversion = _prepareCanonical(request);
+  final frames = conversion.output.length - 44;
+  for (var first = 0; first < frames; first += batchFrames) {
+    conversion.writeFrames(first, min(first + batchFrames, frames));
+    if (first + batchFrames < frames) {
+      await Future<void>.delayed(Duration.zero);
     }
-    final signed = sum ~/ info.channels;
-    output[44 + i] = (signed ~/ 256 + 128).clamp(0, 255);
   }
-  return output;
+  return conversion.output;
 }

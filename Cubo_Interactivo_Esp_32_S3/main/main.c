@@ -4,12 +4,14 @@
 #include "emotions.h"
 #include "cube_ble.h"
 #include "audio_player.h"
+#include "pwr_button.h"
 #ifdef APP_HAS_DRAWING
 extern const uint8_t drawing_start[] asm("_binary_drawing_tft_start");
 extern const uint8_t drawing_end[] asm("_binary_drawing_tft_end");
 #endif
 void app_main(void)
 {
+    ESP_ERROR_CHECK(pwr_button_init());
     ESP_ERROR_CHECK(tft_init());
     bool sd_mounted = data_sd_mount() == ESP_OK;
     bool sd_ready = false;

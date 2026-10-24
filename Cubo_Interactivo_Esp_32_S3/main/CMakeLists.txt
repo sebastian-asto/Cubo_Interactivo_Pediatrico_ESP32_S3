@@ -10,7 +10,7 @@ idf_component_register(
     "app/emotions"
     "app/ble"
 
-    REQUIRES st7789 microSD audio bt nvs_flash)
+    REQUIRES st7789 microSD audio bt nvs_flash esp_driver_gpio)
 
 # Desde V1.5.0 las 16 caras de fabrica viven en
 # /Doc_microSD/default/images. No se duplican dentro de la flash.

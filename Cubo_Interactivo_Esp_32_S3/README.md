@@ -21,22 +21,26 @@ Firmware ESP-IDF 5.5.4 para la placa ESP32-S3 con pantalla ST7789 de 240×240, l
 - Cifrado BLE Just Works y claves persistidas en NVS.
 - Exportación BLE cifrada de imágenes personalizadas por bloques.
 - Mapas de 16 bits para consultar imágenes de usuario y audios existentes.
+- Encendido enclavado y apagado por botón mediante KEY_PWR/GPIO5 y BAT_EN/GPIO2.
 
 ## Estructura relevante
 
 ```text
 Cubo_Interactivo_Esp_32_S3/
-├── componentes/
-│   ├── driver/spi_manager/
+├── components/
+│   ├── driver/
+│   │   ├── i2c_manager/    # Bus de control del codec
+│   │   ├── i2s_manager/    # Flujo PCM hacia el codec
+│   │   └── spi_manager/    # TFT y microSD
 │   └── modules/
 │       ├── st7789/          # Pantalla y framebuffer
 │       ├── microSD/         # FAT, lectura y publicación transaccional
-│       └── audio/           # I2S, ES8311, WAV y volumen
+│       └── audio/           # ES8311 local, WAV y volumen
 ├── main/
 │   ├── app/
 │   │   ├── ble/             # Servicio y protocolo BLE V5
 │   │   ├── emotions/        # Catálogo y resolución de recursos
-│   │   └── power_button/
+│   │   └── power_button/   # KEY_PWR, BAT_EN y apagado por pulsación
 │   ├── assets/              # Solo recursos de respaldo independientes
 │   └── main.c
 ├── docs/BLE_PROTOCOL.md
@@ -50,17 +54,29 @@ Cubo_Interactivo_Esp_32_S3/
 
 ## Secuencia de arranque
 
-1. Inicializa la TFT y su framebuffer.
-2. Monta la microSD.
-3. Crea, recupera o valida la estructura `Doc_microSD`.
-4. Valida las 16 imágenes predeterminadas.
-5. Recupera publicaciones `.new` o `.bak` interrumpidas.
-6. Muestra Feliz cuando todos los recursos están disponibles.
-7. Configura I2S, I2C, ES8311 y NS4150B.
-8. Inicializa NVS y recupera el volumen guardado.
-9. Inicia NimBLE y anuncia el servicio `Cubo-ESP`.
+1. Enclava la alimentación poniendo BAT_EN/GPIO2 en HIGH y configura KEY_PWR/GPIO5 por interrupción.
+2. Inicializa la TFT y su framebuffer.
+3. Monta la microSD.
+4. Crea, recupera o valida la estructura `Doc_microSD`.
+5. Valida las 16 imágenes predeterminadas.
+6. Recupera publicaciones `.new` o `.bak` interrumpidas.
+7. Muestra Feliz cuando todos los recursos están disponibles.
+8. Configura I2S, I2C, ES8311 y NS4150B.
+9. Inicializa NVS y recupera el volumen guardado.
+10. Inicia NimBLE y anuncia el servicio `Cubo-ESP`.
 
 Si falta una imagen predeterminada, el firmware no anuncia la microSD como lista. Así la app evita habilitar operaciones que producirían una pantalla incompleta.
+
+## Encendido y apagado: KEY_PWR y BAT_EN
+
+- GPIO5 lee `KEY_PWR`, activo en LOW y con interrupción por flanco de bajada.
+- Se utiliza el pull-up externo R14 de 10 kΩ a 3,3 V; el pull-up interno queda deshabilitado.
+- Al presionar el botón, D5 baja temporalmente la compuerta de Q2 y permite arrancar desde VBAT.
+- Al comenzar el firmware, GPIO2 pone `BAT_EN` en HIGH; T1 mantiene la compuerta de Q2 baja después de soltar el botón.
+- La tarea `power_button` valida que una nueva pulsación permanezca LOW durante al menos 50 ms.
+- Una pulsación válida lleva `BAT_EN` a LOW. El botón todavía sostiene Q2 mientras está presionado y el devkit se apaga al soltarlo.
+- El siguiente encendido no es una alternancia ejecutada por software: el botón vuelve a alimentar la placa, el ESP32-S3 reinicia y GPIO2 se enclava otra vez en HIGH.
+- Si existe alimentación USB/VBUS, la placa puede seguir encendida aunque `BAT_EN` esté LOW; esta señal controla la ruta de batería.
 
 ## Catálogo e imágenes
 
@@ -109,7 +125,9 @@ El soporte de nombres largos FAT está habilitado porque `Doc_microSD` supera el
 | CODEC_SCL | 41 |
 | PA_CTRL | 7 |
 
-El componente `audio` utiliza `espressif/esp_codec_dev` 1.3.4. La salida I2S se configura como estéreo de 16 bits; cada muestra del WAV mono de 8 bits se convierte a signed 16-bit y se duplica en ambos canales antes de enviarla al codec.
+El audio no depende de un componente administrado externo. `i2c_manager` controla el bus de registros, `i2s_manager` controla el flujo PCM y `modules/audio/es8311.c` contiene la inicialización local del ES8311 para 16 kHz. Por ello el proyecto ya no genera la carpeta `managed_components` ni necesita `espressif/esp_codec_dev`.
+
+La salida I2S se configura como estéreo de 16 bits; cada muestra del WAV mono de 8 bits se convierte a signed 16-bit y se duplica en ambos canales antes de enviarla al codec.
 
 Formato aceptado por el firmware:
 
@@ -130,7 +148,7 @@ La reproducción se ejecuta en la tarea `cube_audio`, que abre el WAV y lo lee d
 
 - Rango lógico: 0–100 %.
 - Valor inicial cuando no existe configuración: 65 %.
-- Aplicación inmediata mediante `esp_codec_dev_set_out_vol`.
+- Aplicación inmediata mediante el driver local `es8311_set_volume`.
 - Clave persistente: namespace `cube_cfg`, valor `volume`.
 - `GET_VOLUME` permite que la app presente el valor real al conectar.
 

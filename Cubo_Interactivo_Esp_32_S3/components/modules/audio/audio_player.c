@@ -3,12 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "driver/gpio.h"
-#include "driver/i2c_master.h"
-#include "driver/i2s_std.h"
-#include "esp_codec_dev.h"
-#include "esp_codec_dev_defaults.h"
-#include "esp_codec_dev_vol.h"
+#include "bus_i2c.h"
+#include "bus_i2s.h"
+#include "es8311.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -24,14 +21,15 @@
 #define AUDIO_I2C_SDA_GPIO 42
 #define AUDIO_I2C_SCL_GPIO 41
 #define AUDIO_PA_GPIO 7
-#define AUDIO_MCLK_MULTIPLE 256
+#define AUDIO_MCLK_MULTIPLE I2S_MCLK_MULTIPLE_256
 #define AUDIO_VOLUME 65
 #define AUDIO_FILE_PATH_MAX 128
 #define AUDIO_STREAM_FRAMES 512U
 
 static const char *TAG = "AUDIO";
-static i2s_chan_handle_t s_tx;
-static esp_codec_dev_handle_t s_codec;
+static bus_i2c_handle_t s_i2c;
+static bus_i2s_handle_t s_i2s;
+static es8311_handle_t s_codec;
 static bool s_ready;
 static uint8_t s_volume = AUDIO_VOLUME;
 static QueueHandle_t s_play_queue;
@@ -177,96 +175,49 @@ esp_err_t audio_player_init(void)
 {
     if (s_ready) return ESP_OK;
 
-    i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(AUDIO_I2S_PORT, I2S_ROLE_MASTER);
-    channel.auto_clear = true;
-    esp_err_t err = i2s_new_channel(&channel, &s_tx, NULL);
-    if (err != ESP_OK) return err;
-
-    i2s_std_config_t standard = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_WAV_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-            I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
-        .gpio_cfg = {
-            .mclk = AUDIO_MCLK_GPIO,
-            .bclk = AUDIO_BCLK_GPIO,
-            .ws = AUDIO_LRCK_GPIO,
-            .dout = AUDIO_DOUT_GPIO,
-            .din = I2S_GPIO_UNUSED,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
-    };
-    standard.clk_cfg.mclk_multiple = AUDIO_MCLK_MULTIPLE;
-    err = i2s_channel_init_std_mode(s_tx, &standard);
-    if (err != ESP_OK) return err;
-    err = i2s_channel_enable(s_tx);
-    if (err != ESP_OK) return err;
-
-    i2c_master_bus_handle_t i2c_bus = NULL;
-    const i2c_master_bus_config_t i2c_config = {
-        .i2c_port = AUDIO_I2C_PORT,
-        .sda_io_num = AUDIO_I2C_SDA_GPIO,
-        .scl_io_num = AUDIO_I2C_SCL_GPIO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    err = i2c_new_master_bus(&i2c_config, &i2c_bus);
-    if (err != ESP_OK) return err;
-
-    audio_codec_i2c_cfg_t control_config = {
-        .port = AUDIO_I2C_PORT,
-        .addr = ES8311_CODEC_DEFAULT_ADDR,
-        .bus_handle = i2c_bus,
-    };
-    const audio_codec_ctrl_if_t *control = audio_codec_new_i2c_ctrl(&control_config);
-    audio_codec_i2s_cfg_t data_config = {
+    const bus_i2s_config_t i2s_config = {
         .port = AUDIO_I2S_PORT,
-        .rx_handle = NULL,
-        .tx_handle = s_tx,
+        .mclk_gpio = AUDIO_MCLK_GPIO,
+        .bclk_gpio = AUDIO_BCLK_GPIO,
+        .ws_gpio = AUDIO_LRCK_GPIO,
+        .dout_gpio = AUDIO_DOUT_GPIO,
+        .sample_rate_hz = AUDIO_WAV_SAMPLE_RATE,
+        .mclk_multiple = AUDIO_MCLK_MULTIPLE,
     };
-    const audio_codec_data_if_t *data = audio_codec_new_i2s_data(&data_config);
-    const audio_codec_gpio_if_t *gpio = audio_codec_new_gpio();
-    if (!control || !data || !gpio) return ESP_ERR_NO_MEM;
+    esp_err_t err = bus_i2s_open(&i2s_config, &s_i2s);
+    if (err != ESP_OK) return err;
 
-    es8311_codec_cfg_t codec_config = {
-        .ctrl_if = control,
-        .gpio_if = gpio,
-        .codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC,
-        .master_mode = false,
-        .use_mclk = true,
-        .pa_pin = AUDIO_PA_GPIO,
-        .pa_reverted = false,
-        .hw_gain = {
-            .pa_voltage = 5.0,
-            .codec_dac_voltage = 3.3,
-        },
-        .mclk_div = AUDIO_MCLK_MULTIPLE,
+    const bus_i2c_config_t i2c_config = {
+        .port = AUDIO_I2C_PORT,
+        .sda_gpio = AUDIO_I2C_SDA_GPIO,
+        .scl_gpio = AUDIO_I2C_SCL_GPIO,
+        .clock_hz = 100000,
+        .device_address = ES8311_I2C_ADDRESS,
     };
-    const audio_codec_if_t *codec_if = es8311_codec_new(&codec_config);
-    if (!codec_if) return ESP_FAIL;
+    err = bus_i2c_open(&i2c_config, &s_i2c);
+    if (err != ESP_OK) {
+        bus_i2s_close(s_i2s);
+        s_i2s = NULL;
+        return err;
+    }
 
-    esp_codec_dev_cfg_t device_config = {
-        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
-        .codec_if = codec_if,
-        .data_if = data,
+    const es8311_config_t codec_config = {
+        .i2c = s_i2c,
+        .pa_gpio = AUDIO_PA_GPIO,
+        .pa_active_high = true,
+        .sample_rate_hz = AUDIO_WAV_SAMPLE_RATE,
+        .mclk_hz = AUDIO_WAV_SAMPLE_RATE * 256U,
     };
-    s_codec = esp_codec_dev_new(&device_config);
-    if (!s_codec) return ESP_FAIL;
-
-    esp_codec_dev_sample_info_t sample = {
-        .bits_per_sample = 16,
-        .channel = 2,
-        .channel_mask = 0x03,
-        .sample_rate = AUDIO_WAV_SAMPLE_RATE,
-    };
-    if (esp_codec_dev_open(s_codec, &sample) != ESP_CODEC_DEV_OK ||
-        esp_codec_dev_set_out_vol(s_codec, s_volume) != ESP_CODEC_DEV_OK ||
-        esp_codec_dev_set_out_mute(s_codec, true) != ESP_CODEC_DEV_OK) {
-        return ESP_FAIL;
+    err = es8311_init(&codec_config, &s_codec);
+    if (err == ESP_OK) err = es8311_set_volume(s_codec, s_volume);
+    if (err != ESP_OK) {
+        es8311_deinit(s_codec);
+        s_codec = NULL;
+        bus_i2c_close(s_i2c);
+        s_i2c = NULL;
+        bus_i2s_close(s_i2s);
+        s_i2s = NULL;
+        return err;
     }
     s_codec_lock = xSemaphoreCreateMutex();
     s_play_queue = xQueueCreate(1, sizeof(audio_request_t));
@@ -295,12 +246,10 @@ esp_err_t audio_player_set_volume(uint8_t volume)
     if (!s_ready) return ESP_ERR_INVALID_STATE;
     if (volume > 100) return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(s_codec_lock, portMAX_DELAY);
-    int result = esp_codec_dev_set_out_vol(s_codec, volume);
-    if (result == ESP_CODEC_DEV_OK) s_volume = volume;
+    esp_err_t result = es8311_set_volume(s_codec, volume);
+    if (result == ESP_OK) s_volume = volume;
     xSemaphoreGive(s_codec_lock);
-    if (result != ESP_CODEC_DEV_OK) {
-        return ESP_FAIL;
-    }
+    if (result != ESP_OK) return result;
     ESP_LOGI(TAG, "Volumen: %u%%", (unsigned)volume);
     return ESP_OK;
 }
@@ -317,9 +266,9 @@ static esp_err_t play_wav(const uint8_t *wav, size_t size, uint32_t generation,
     int16_t *stereo = malloc(512U * 2U * sizeof(int16_t));
     if (!stereo) return ESP_ERR_NO_MEM;
     xSemaphoreTake(s_codec_lock, portMAX_DELAY);
-    int codec_result = esp_codec_dev_set_out_mute(s_codec, false);
+    esp_err_t codec_result = es8311_set_mute(s_codec, false);
     xSemaphoreGive(s_codec_lock);
-    if (codec_result != ESP_CODEC_DEV_OK) {
+    if (codec_result != ESP_OK) {
         free(stereo);
         return ESP_FAIL;
     }
@@ -339,17 +288,19 @@ static esp_err_t play_wav(const uint8_t *wav, size_t size, uint32_t generation,
             stereo[i * 2 + 1] = sample;
         }
         xSemaphoreTake(s_codec_lock, portMAX_DELAY);
-        int result = esp_codec_dev_write(s_codec, stereo,
-                                         (int)(frames * 2 * sizeof(int16_t)));
+        size_t bytes_written = 0;
+        esp_err_t result = bus_i2s_write(s_i2s, stereo,
+                                         frames * 2 * sizeof(int16_t),
+                                         &bytes_written);
         xSemaphoreGive(s_codec_lock);
-        if (result != ESP_CODEC_DEV_OK) {
+        if (result != ESP_OK || bytes_written != frames * 2 * sizeof(int16_t)) {
             err = ESP_FAIL;
             break;
         }
         offset += frames;
     }
     xSemaphoreTake(s_codec_lock, portMAX_DELAY);
-    esp_codec_dev_set_out_mute(s_codec, true);
+    es8311_set_mute(s_codec, true);
     xSemaphoreGive(s_codec_lock);
     free(stereo);
     ESP_LOGI(TAG, "WAV %s: %u/%u muestras, %u ms",
@@ -379,9 +330,9 @@ static esp_err_t play_wav_file(const char *path, uint32_t generation)
     if (fseek(file, samples_offset, SEEK_SET) != 0) err = ESP_FAIL;
     if (err == ESP_OK) {
         xSemaphoreTake(s_codec_lock, portMAX_DELAY);
-        int result = esp_codec_dev_set_out_mute(s_codec, false);
+        esp_err_t result = es8311_set_mute(s_codec, false);
         xSemaphoreGive(s_codec_lock);
-        if (result != ESP_CODEC_DEV_OK) err = ESP_FAIL;
+        if (result != ESP_OK) err = result;
     }
 
     size_t offset = 0;
@@ -403,17 +354,19 @@ static esp_err_t play_wav_file(const char *path, uint32_t generation)
             stereo[i * 2 + 1] = sample;
         }
         xSemaphoreTake(s_codec_lock, portMAX_DELAY);
-        int result = esp_codec_dev_write(s_codec, stereo,
-                                         (int)(frames * 2 * sizeof(int16_t)));
+        size_t bytes_written = 0;
+        esp_err_t result = bus_i2s_write(s_i2s, stereo,
+                                         frames * 2 * sizeof(int16_t),
+                                         &bytes_written);
         xSemaphoreGive(s_codec_lock);
-        if (result != ESP_CODEC_DEV_OK) {
+        if (result != ESP_OK || bytes_written != frames * 2 * sizeof(int16_t)) {
             err = ESP_FAIL;
             break;
         }
         offset += frames;
     }
     xSemaphoreTake(s_codec_lock, portMAX_DELAY);
-    esp_codec_dev_set_out_mute(s_codec, true);
+    es8311_set_mute(s_codec, true);
     xSemaphoreGive(s_codec_lock);
     free(mono);
     free(stereo);
